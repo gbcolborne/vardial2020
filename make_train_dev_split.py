@@ -23,7 +23,6 @@ logging.basicConfig(format = '%(asctime)s - %(levelname)s - %(name)s -   %(messa
 random.seed(91500)
 
 # Get all langs
-
 langs = sorted(map_ULI_langs_to_paths().keys())
 
 # Build dev set
