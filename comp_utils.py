@@ -52,13 +52,13 @@ def extract_text_and_url(line, lang):
 
 
 def stream_sents(lang):
-    """Stream sentences from training data. Skip empty lines."""
+    """Stream sentences (along with their URL) from training data. Skip empty lines."""
     path = get_path_for_lang(lang)
     with open(path) as f:
         for line in f:
             text, url = extract_text_and_url(line, lang)
             if len(text):
-                yield text
+                yield (text, url)
                 
 
 
