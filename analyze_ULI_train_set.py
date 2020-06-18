@@ -4,7 +4,7 @@ import argparse
 from collections import defaultdict
 import statistics as stats
 from url_utils import get_netloc, get_toplevel_domains
-from comp_utils import RELEVANT_LANGS, map_ULI_langs_to_paths
+from comp_utils import RELEVANT_LANGS, map_ULI_langs_to_paths, extract_text_and_url 
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--include_irrelevant", action='store_true', help="Include irrelevant languages (takes much longer)")
@@ -34,19 +34,9 @@ for i, lang in enumerate(langs):
         nb_sents = 0
         for line in f:
             nb_sents += 1
-            # Extract text
-            if lang in RELEVANT_LANGS:
-                # Last space separated token is the source URL
-                cut = line.rstrip().rfind(" ")
-                text = line[:cut]
-                url = line[cut+1:]
-                assert url.startswith("http")
+            text, url = extract_text_and_url(line, lang)
+            if url:
                 uniq_urls.add(url)
-            else:
-                line_number, text = line.split("\t")
-                text = text.strip()
-                # Make sure we can convert the line number to an int
-                int(line_number)
             # Whitespace-tokenize text
             for word in text.split(" "):
                 word2freq[word] += 1
@@ -73,7 +63,6 @@ for i, lang in enumerate(langs):
 
 
 # Print some summary stats
-
 for (statname, vals) in [("Vocab size", vocab_sizes),
                          ("Alphabet size", alphabet_sizes),
                          ("Sents/URL ratio", spu_ratios)]:
