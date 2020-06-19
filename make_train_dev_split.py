@@ -53,8 +53,8 @@ else:
     irr_counts = np.array([lang2freq[k] for k in irr_langs], dtype=np.float)
     irr_probs = irr_counts / irr_counts.sum()
 # Compute expected count of dev sentences. Use a sum-safe rounding function.
-rel_dev_counts = [int(x) for x in saferound(rel_probs * args.rel_size, 0, "difference")]
-irr_dev_counts = [int(x) for x in saferound(irr_probs * args.irr_size, 0, "difference")]
+rel_dev_counts = [int(x) for x in saferound(rel_probs * args.rel_size, 0, "largest")]
+irr_dev_counts = [int(x) for x in saferound(irr_probs * args.irr_size, 0, "largest")]
 
 def build_example(text, lang):
     return "%s\t%s" % (text, lang)
@@ -68,6 +68,7 @@ f_dev = open(path_dev, 'w')
 logger.info("  ----------------")
 logger.info("  lang (train/dev)")
 logger.info("  ----------------")
+#for lang in langs:
 for lang in langs:
     nb_sents = int(lang2freq[lang])
     all_indices = list(range(nb_sents))
@@ -79,21 +80,26 @@ for lang in langs:
     logger.info("  %s (%d/%d)" % (lang, nb_train, nb_dev))
     dev_empty = nb_dev == 0
     if not dev_empty:
-        dev_indices = np.random.randint(0, high=nb_sents, size=nb_dev)
+        dev_indices = np.random.choice(np.arange(nb_sents,  dtype=int), size=nb_dev, replace=False)
         sorted_dev_indices = sorted(dev_indices)
+        next_dev_ix = sorted_dev_indices.pop(0)
+    nb_dev_written = 0
     for i, (text,url) in enumerate(stream_sents(lang)):
-        example = build_example(text, lang)
-        example += "\n"
+        example = build_example(text, lang) + "\n"
         if dev_empty:
             f_train.write(example)
         else:
-            if i == sorted_dev_indices[0]:
+            if i == next_dev_ix:
                 f_dev.write(example)
-                _ = sorted_dev_indices.pop(0)
+                nb_dev_written += 1
                 if len(sorted_dev_indices) == 0:
                     dev_empty = True
+                else:
+                    next_dev_ix = sorted_dev_indices.pop(0)
             else:
                 f_train.write(example)
+    if nb_dev_written != nb_dev:
+        raise ValueError("Expected {} but got {}.".format(nb_dev, nb_dev_written))
 f_train.close()
 f_dev.close()
 
