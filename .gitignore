@@ -1,3 +1,6 @@
+# Data sub-directory
+data/
+
 # Emacs backup files
 *~
 
