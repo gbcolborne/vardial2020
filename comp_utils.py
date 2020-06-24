@@ -14,7 +14,7 @@ RELEVANT_LANGS = set(['fit', 'fkv', 'izh', 'kca', 'koi', 'kpv', 'krl',
 IRRELEVANT_URALIC_LANGS = set(['ekk', 'fin', 'hun'])
 
 # Path of directory containing ULI training data
-DIR_ULI_TRAIN = "train_data/ULI2020_training"
+DIR_ULI_TRAIN = "data/ULI_training_data/ULI2020_training"
 
 
 def map_ULI_langs_to_paths():
