@@ -4,7 +4,14 @@ import os, glob
 from collections import OrderedDict
 
 # Relevant langs for ULI task
-RELEVANT_LANGS = set("fit fkv izh kca koi kpv krl liv lud mdf mhr mns mrj myv nio olo sjd sjk sju sma sme smj smn sms udm vep vot vro yrk".split(" "))
+RELEVANT_LANGS = set(['fit', 'fkv', 'izh', 'kca', 'koi', 'kpv', 'krl',
+                      'liv', 'lud', 'mdf', 'mhr', 'mns', 'mrj', 'myv',
+                      'nio', 'olo', 'sjd', 'sjk', 'sju', 'sma', 'sme',
+                      'smj', 'smn', 'sms', 'udm', 'vep', 'vot', 'vro',
+                      'yrk'])
+
+# Irrelevant Uralic languages for ULI task
+IRRELEVANT_URALIC_LANGS = set(['ekk', 'fin', 'hun'])
 
 # Path of directory containing ULI training data
 DIR_ULI_TRAIN = "train_data/ULI2020_training"

@@ -2,7 +2,7 @@
 
 import os, argparse, random, logging
 import numpy as np
-from comp_utils import map_ULI_langs_to_paths, stream_sents, RELEVANT_LANGS
+from comp_utils import map_ULI_langs_to_paths, stream_sents, RELEVANT_LANGS, IRRELEVANT_URALIC_LANGS
 from iteround import saferound
 
 parser = argparse.ArgumentParser()
