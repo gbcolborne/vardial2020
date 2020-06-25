@@ -47,58 +47,72 @@ def main():
         pred = p_tmp[:]
         gold = g_tmp[:]
 
-
-    print("\nPred:")
-    print(pred)
-    print("Gold:")
-    print(gold)
-    print("\n\n")
+    # For track 2, the score is the micro-averaged f1-score over
+    # sentences.
     if args.track == 2:
-        # For track 2, the score is the micro-averaged f1-score
-        # over sentences.
         p,r,f,_ = prfs(gold, pred, beta=1.0, labels=None, average="micro", zero_division=0)
         title = "Results (track 2)"
         print_title_with_border(title)
-        print("Precision: {:.4f}".format(p))
-        print("Recall: {:.4f}".format(r))
-        print("F1-score: {:.4f}\n".format(f))
-    elif args.track in [1,3]:
-        # For tracks 1 and 3, the score is the average (macro)
-        # f1-score over a set of languages. For track 1, these are the
-        # 29 relevant Uralic languages. For track 3, these are all 178
-        # languages.
+        print("Precision: %.4f" % p)
+        print("Recall: %.4f" % r)
+        print("F1-score: %.4f\n" % f)
+        return
+
+    # For tracks 1 and 3, the score is the average (macro) f1-score
+    # over a set of languages. For track 1, these are the 29 relevant
+    # Uralic languages. For track 3, these are all 178 languages.
+    if args.track in [1,3]:
         if args.track == 1:
             labels = sorted(rel_lang_ids)
         elif args.track == 3:
-            labels = sorted(land2id.keys())
+            labels = sorted(lang2id.values())
+        # Get binary confusion matrix for each label
         conf = mcm(gold, pred, sample_weight=None, labels=labels, samplewise=False)
         f1scores = []
         for i in range(len(labels)):
-            tn = conf[i,0,0]
+            # Get sufficient statistics from confusion matrix for this label
             tp = conf[i,1,1]                        
             fp = conf[i,0,1]
             fn = conf[i,1,0]
             nb_pred = tp + fp
             nb_gold = tp + fn
-            precision = tp / nb_pred
-            recall = tp / nb_gold
-            f1score = 2 * precision * recall / (precision + recall)
+            # Compute f1-score for this label
+            f1score = None
+            if nb_gold == 0:
+                if nb_pred == 0:
+                    # If nb_pred is 0 and nb_gold is 0, then both
+                    # recall and precision are undefined. In this
+                    # case, I assume f1-score is 1, though it is not
+                    # explicitly stated in the track definitions.
+                    f1score = 1.0
+                else:
+                    assert nb_pred > 0
+                    # If nb_pred is strictly positive but nb_gold is
+                    # 0, then recall is undefined, and precision is
+                    # 0. In this case, f1-score is 0 per the
+                    # definition of track 1.
+                    f1score = 0.0
+            else:
+                assert nb_gold > 0
+                if nb_pred == 0:
+                    # If nb_pred is 0 but nb_gold is strictly
+                    # positive, then recall is 0, and precision is
+                    # undefined. In this case, I assume f-score is 0,
+                    # which is a safe (and common) assumption.
+                    f1score = 0.0
+                else:
+                    assert nb_pred > 0
+                    # If nb_pred and nb_gold are both strictly
+                    # positive, f-score is well-defined.
+                    precision = tp / nb_pred
+                    recall = tp / nb_gold
+                    f1score = 2 * precision * recall / (precision + recall)
             f1scores.append(f1score)
-            print("\nLabel: %s" % all_langs[labels[i]])
-            print("  tn: %d" % tn)
-            print("  tp: %d" % tp)
-            print("  fp: %d" % fp)
-            print("  fn: %d" % fn)
-            print("  nb_pred: %d" % nb_pred)
-            print("  nb_gold: %d" % nb_gold)
-            print("  precision: %f" % precision)
-            print("  recall: %f" % recall)
-            print("  f1score: %f" % f1score)
         macro_f1score = sum(f1scores) / len(f1scores)
         title = "Results (track %d)" % args.track
         print_title_with_border(title)
-        print("Average (macro) F1-score: {:.4f}".format(macro_f1score))
-            
+        print("Average (macro) F1-score: %.4f\n" % macro_f1score)
+        return
 
         
 if __name__ == "__main__":
