@@ -1,4 +1,4 @@
-""" Analyze ULI training data language by language. """
+""" Analyze ULI training data. """
 
 import argparse
 from collections import defaultdict, Counter
@@ -63,7 +63,42 @@ def analyze_text_lengths(langs):
     print_stats(all_text_lengths)
     for threshold in [64,128,256,512]:
         print_count_gt_threshold(all_text_lengths, threshold)
-    
+        
+
+def analyze_urls(langs):
+    urls = []
+    for i, lang in enumerate(langs):
+        urls.append([u for t,u in stream_sents(lang)])
+        print("{}/{}. {}".format(i+1, len(langs), lang))
+
+    # Map URLs to langs. Do same for top-level domains (generic and country code). 
+    url2langs = {}
+    netloc2langs = {}
+    domain2langs = {}
+    suffix2langs = {}
+    for lang, urls in zip(langs, urls):
+        uniq_urls = set(urls)
+        for url in uniq_urls:
+            netloc = get_netloc(url)
+            domain, suffix = get_toplevel_domains(url)
+            for key, dct in [(url, url2langs),
+                             (netloc, netloc2langs),
+                             (domain, domain2langs),
+                             (suffix, suffix2langs)]:
+                if key not in dct:
+                    dct[key] = []
+                dct[key].append(lang)
+
+    # Show some results
+    for keyname, dct in [("Netlocs", netloc2langs),
+                         ("Domains", domain2langs),
+                         ("Suffixes", suffix2langs)]:
+        print_title_with_border(keyname)
+        for i, (key, langs) in enumerate(sorted(dct.items(), key=lambda x:len(x[1]), reverse=True)):
+            lang_fd = Counter(langs)
+            lang_str = ", ".join("%s (%d)" % (l,f) for l,f in sorted(lang_fd.items(),key=lambda x:x[1], reverse=True))
+            print(" %d. %s: %s" % (i+1, key, lang_str))
+
 
 def analyze_words_chars_urls(langs):
     vocab_sizes = []
@@ -112,9 +147,11 @@ def analyze_words_chars_urls(langs):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("langs", choices=["french", "irrelevant-uralic", "relevant", "irrelevant", "all"])
-    parser.add_argument("analysis", choices=["corpus-sizes", "text-lengths", "words-chars-urls"])
+    parser.add_argument("analysis", choices=["corpus-sizes", "text-lengths", "words-chars-urls", "urls-in-depth"])
     args = parser.parse_args()
-
+    if args.analysis == "urls-in-depth":
+        assert args.langs == "relevant"
+        
     # Get all languages and their path
     lang2path = map_ULI_langs_to_paths()
 
@@ -130,7 +167,9 @@ def main():
         langs = list(IRRELEVANT_URALIC_LANGS)
     elif args.langs == "french":
         langs = ['fra']
-    print("\nLangs ({}): {}".format(len(langs), langs))
+
+    # Pring langs we are processing
+    print("\nLangs ({}): {}\n".format(len(langs), langs))
 
     # Run
     if args.analysis == "corpus-sizes":
@@ -139,6 +178,8 @@ def main():
         analyze_text_lengths(langs)
     elif args.analysis == "words-chars-urls":
         analyze_words_chars_urls(langs)
+    elif args.analysis == "urls-in-depth":
+        analyze_urls(langs)
     print("\n\n")
     return
 
