@@ -10,7 +10,7 @@ def load_labels(path, lang2id):
 def print_title_with_border(title):
     title = "--- %s ---" % title
     line = "-" * len(title)
-    print("\n%s\n%s\n%s\n" % (line, title, line))
+    print("\n\n%s\n%s\n%s\n" % (line, title, line))
 
 def main():
     parser = argparse.ArgumentParser()
@@ -20,6 +20,8 @@ def main():
                         help=("Eval track (1 is 'relevant langs as equals', "
                               "2 is 'relevant sents as equals', "
                               "and 3 in 'all 178 langs as equals')"))
+    parser.add_argument("--verbose", action="store_true",
+                        help="Show class-wise stats (tracks 1 and 3 only)")
     args = parser.parse_args()
 
     # Load languages
@@ -53,9 +55,9 @@ def main():
         p,r,f,_ = prfs(gold, pred, beta=1.0, labels=None, average="micro", zero_division=0)
         title = "Results (track 2)"
         print_title_with_border(title)
-        print("Precision: %.4f" % p)
-        print("Recall: %.4f" % r)
-        print("F1-score: %.4f\n" % f)
+        print("- Precision: %.4f" % p)
+        print("- Recall: %.4f" % r)
+        print("- F1-score: %.4f\n\n" % f)
         return
 
     # For tracks 1 and 3, the score is the average (macro) f1-score
@@ -108,10 +110,16 @@ def main():
                     recall = tp / nb_gold
                     f1score = 2 * precision * recall / (precision + recall)
             f1scores.append(f1score)
+            if args.verbose:
+                print("\nStats for label '%s':" % all_langs[labels[i]])
+                print("  # gold: %d" % nb_gold)
+                print("  # pred: %d" % nb_pred)
+                print("  # true pos: %d" % tp)
+                print("  F1-score: %.4f" % f1score)
         macro_f1score = sum(f1scores) / len(f1scores)
         title = "Results (track %d)" % args.track
         print_title_with_border(title)
-        print("Average (macro) F1-score: %.4f\n" % macro_f1score)
+        print("- Average (macro) F1-score: %.4f\n\n" % macro_f1score)
         return
 
         
