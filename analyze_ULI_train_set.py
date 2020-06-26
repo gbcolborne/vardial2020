@@ -171,7 +171,7 @@ def analyze_words_chars_urls(langs):
     
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("langs", choices=["french", "confounders", "relevant", "irrelevant", "irrelevant-without-confouders", "all"])
+    parser.add_argument("langs", choices=["french", "confounders", "relevant", "irrelevant", "irrelevant-without-confounders", "all"])
     parser.add_argument("analysis", choices=["corpus-sizes", "text-lengths", "alphabet-sizes", "words-chars-urls", "urls-in-depth"])
     args = parser.parse_args()
     if args.analysis == "urls-in-depth":
