@@ -65,9 +65,8 @@ def analyze_alphabet_sizes(langs):
     print_title_with_border("Summary of alphabet sizes")    
     print_stats(alphabet_sizes)    
     print("- Size of super-alphabet: %d" % len(super_alphabet_fd))
-    for t in [1,2,3,4,5]:
-        count = sum(1 for c,f in super_alphabet_fd.items() if f > t)
-        print("- Nb chars in super-alphabet with freq > %d: %d/%d" % (t, count, len(super_alphabet_fd)))
+    nb_hapax = sum(1 for c,f in super_alphabet_fd.items() if f == 1)
+    print("- Nb chars in super-alphabet with freq == 1: %d/%d" % (nb_hapax, len(super_alphabet_fd)))
     
     
 def analyze_text_lengths(langs):
