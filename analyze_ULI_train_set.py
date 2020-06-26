@@ -44,6 +44,31 @@ def analyze_corpus_sizes(langs):
     print_title_with_border("Summary of corpus sizes")    
     print_stats(list(corpus_sizes))    
 
+
+def analyze_alphabet_sizes(langs):
+    alphabet_sizes = []
+    super_alphabet_fd = {}
+    print()
+    for i, lang in enumerate(langs):            
+        print("{}/{}. {}".format(i+1, len(langs), lang))
+
+        text = ""
+        for (t, url) in stream_sents(lang):
+            text += t
+        alphabet_fd = Counter(text)            
+        alphabet_sizes.append(len(alphabet_fd))
+        for char, freq in alphabet_fd.items():
+            if char not in super_alphabet_fd:
+                super_alphabet_fd[char] = freq
+            else:
+                super_alphabet_fd[char] += freq
+    print_title_with_border("Summary of alphabet sizes")    
+    print_stats(alphabet_sizes)    
+    print("- Size of super-alphabet: %d" % len(super_alphabet_fd))
+    for t in [1,2,3,4,5]:
+        count = sum(1 for c,f in super_alphabet_fd.items() if f > t)
+        print("- Nb chars in super-alphabet with freq > %d: %d/%d" % (t, count, len(super_alphabet_fd)))
+    
     
 def analyze_text_lengths(langs):
     text_lengths = []
@@ -146,8 +171,8 @@ def analyze_words_chars_urls(langs):
     
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("langs", choices=["french", "irrelevant-uralic", "relevant", "irrelevant", "all"])
-    parser.add_argument("analysis", choices=["corpus-sizes", "text-lengths", "words-chars-urls", "urls-in-depth"])
+    parser.add_argument("langs", choices=["french", "confounders", "relevant", "irrelevant", "irrelevant-without-confouders", "all"])
+    parser.add_argument("analysis", choices=["corpus-sizes", "text-lengths", "alphabet-sizes", "words-chars-urls", "urls-in-depth"])
     args = parser.parse_args()
     if args.analysis == "urls-in-depth":
         assert args.langs == "relevant"
@@ -163,8 +188,11 @@ def main():
     elif args.langs == "irrelevant":
         all_langs = set(lang2path.keys())
         langs = all_langs.difference(RELEVANT_LANGS)
-    elif args.langs == "irrelevant-uralic":
-        langs = list(IRRELEVANT_URALIC_LANGS)
+    elif args.langs == "confounders":
+        langs = list(IRRELEVANT_URALIC_LANGS)        
+    elif args.langs == "irrelevant-without-confounders":
+        all_langs = set(lang2path.keys())
+        langs = all_langs.difference(RELEVANT_LANGS).difference(IRRELEVANT_URALIC_LANGS)
     elif args.langs == "french":
         langs = ['fra']
 
@@ -176,6 +204,8 @@ def main():
         analyze_corpus_sizes(langs)
     elif args.analysis == "text-lengths":
         analyze_text_lengths(langs)
+    elif args.analysis == "alphabet-sizes":
+        analyze_alphabet_sizes(langs)
     elif args.analysis == "words-chars-urls":
         analyze_words_chars_urls(langs)
     elif args.analysis == "urls-in-depth":
