@@ -20,7 +20,7 @@ def disambig(dir_out, max_length=None):
     f = open(path_tmp, 'w')
     line_count = 0
     lang_fd = {}
-    for i, lang in enumerate(langs[:5]):
+    for i, lang in enumerate(langs):
         print("{}/{}. {}".format(i+1, len(langs), lang))
 
         # Apply length cutoff and deduplicate
