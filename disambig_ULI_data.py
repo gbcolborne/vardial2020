@@ -6,9 +6,7 @@ from itertools import combinations
 
 def disambig(dir_out, max_length=None):
     # Check args
-    if os.path.exists(dir_out):
-        assert os.path.isdir(dir_out) and len(os.listdir(dir_out)) == 0
-    else:
+    if not os.path.exists(dir_out):
         os.makedirs(dir_out)
 
     lang2path = map_ULI_langs_to_paths()
@@ -17,38 +15,56 @@ def disambig(dir_out, max_length=None):
     
     # Write labeled data. Store class frequencies
     path_tmp = os.path.join(dir_out, "data.labeled.tmp")
-    f = open(path_tmp, 'w')
-    line_count = 0
-    lang_fd = {}
-    for i, lang in enumerate(langs):
-        print("{}/{}. {}".format(i+1, len(langs), lang))
-
-        # Apply length cutoff and deduplicate
-        uniq_sents = set()
-        data = []
-        for (text, text_id, url) in stream_sents(lang):
-            if max_length is not None:
-                text = text[:max_length]
-            if text not in uniq_sents:
-                uniq_sents.add(text)
-                data.append((text,text_id,url))
-        for (text, text_id, url) in data: 
-            line = data_to_string(text, lang, "custom", url=url, text_id=text_id, label=lang)
-            f.write(line)
-            line_count += 1
-        lang_fd[lang] = len(data)
-    f.close()
+    path_lang_fd = os.path.join(dir_out, "data.lang_fd.tsv")
+    lang_fd = None
+    if not os.path.exists(path_tmp):
+        f = open(path_tmp, 'w')
+        line_count = 0
+        lang_fd = {}
+        for i, lang in enumerate(langs):
+            print("{}/{}. {}".format(i+1, len(langs), lang))
+            
+            # Apply length cutoff and deduplicate
+            uniq_sents = set()
+            data = []
+            for (text, text_id, url) in stream_sents(lang):
+                if max_length is not None:
+                    text = text[:max_length]
+                if text not in uniq_sents:
+                    uniq_sents.add(text)
+                    data.append((text,text_id,url))
+            for (text, text_id, url) in data: 
+                line = data_to_string(text, lang, "custom", url=url, text_id=text_id, label=lang)
+                if not len(line.strip()):
+                    print("what's up?")
+                    print(line)
+                f.write(line)
+                line_count += 1
+            lang_fd[lang] = len(data)
+        f.close()
+        with open(path_lang_fd, 'w') as f:
+            for (lang, freq) in lang_fd.items():
+                f.write("%s\t%d\n" % (lang, freq))
 
     # Sort labeled dataset in alphabetical order of texts
     path_sorted = os.path.join(dir_out, "data.sorted.tmp")
-    cmd = ["shuf", path_tmp]
-    print("\nSorting %d texts... " % line_count)
-    with open(path_sorted, 'w') as outfile:
-        subprocess.run(cmd, stdout=outfile)
-    print("Done.")
-    cmd = ["rm", path_tmp]
-    subprocess.run(cmd)
+    if not os.path.exists(path_sorted):
+        cmd = ["sort", path_tmp]
+        print("\nSorting %d texts... " % line_count)
+        with open(path_sorted, 'w') as outfile:
+            subprocess.run(cmd, stdout=outfile)
+        print("Done.")
 
+    # Check if we skipped labeling and sorting
+    if lang_fd is None:
+        lang_fd = {}
+        with open(path_lang_fd) as f:
+            for line in f:
+                elems = line.strip().split("\t")
+                lang = elems[0]
+                freq = elems[1]
+                lang_fd[lang] = freq
+        
     # Read in sorted dataset, look for duplicate texts, write disambiguated dataset
     lang2outfile = {lang:open(os.path.join(dir_out, lang2filename[lang]), 'w') for lang in langs}
     prev_text = None
@@ -58,8 +74,9 @@ def disambig(dir_out, max_length=None):
     print("\nDisambiguating... ")    
     with open(path_sorted) as f_in:
         for i, line in enumerate(f_in):
+            if not len(line.strip()):
+                continue
             (text, text_id, url, lang) = string_to_data(line, "custom", lang=None)
-            
             if text == prev_text:
                 prev_labels.append(lang)
             else:
@@ -81,6 +98,11 @@ def disambig(dir_out, max_length=None):
     print("# texts processed: %d/%d" % (line_count, line_count))
     for (lang, outfile) in lang2outfile.items():
         outfile.close()
+
+    
+    # Clean up.
+    cmd = ["rm", path_tmp]
+    subprocess.run(cmd)
     cmd = ["rm", path_sorted]
     subprocess.run(cmd)
 
