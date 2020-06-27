@@ -56,14 +56,13 @@ def data_to_string(text, lang, frmt, url=None, text_id=None, label=None):
             return "%s\t%s\t%s\n" % (text, label, text_id)
 
         
-def string_to_data(string, lang, frmt):
+def string_to_data(string, frmt, lang=None):
     """ Parse a line from the dataset.
 
     Args:
     - string
-    - lang
     - frmt: format
-
+    - lang (required if frmt is `source`)
 
     Returns: (text, text_id, url, lang)
 
@@ -72,6 +71,7 @@ def string_to_data(string, lang, frmt):
     if frmt == "source":
         # This is the format used in the source package containing the
         # ULI training data
+        assert lang is not None
         if lang in RELEVANT_LANGS:
             # Last space separated token is the source URL
             cut = string.rstrip().rfind(" ")
@@ -125,7 +125,7 @@ def get_path_for_lang(lang):
 
 def extract_text_id_and_url(line, lang):
     """Extract text from a line extracted from one of the training files. """
-    text, text_id, url = string_to_data(line, lang, "source")
+    text, text_id, url, lang = string_to_data(line, "source", lang=lang)
     return (text, text_id, url)
 
 def stream_sents(lang):
