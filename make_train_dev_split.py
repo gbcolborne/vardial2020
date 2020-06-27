@@ -68,7 +68,7 @@ def main():
     lang2freq = {}
     for lang in langs:
         logger.info("  " + lang)
-        lang2freq[lang] = sum(1 for (sent, url) in stream_sents(lang))
+        lang2freq[lang] = sum(1 for (sent, text_id, url) in stream_sents(lang))
     if args.balance_rel:
         rel_probs = np.ones(len(rel_langs), dtype=float) / len(rel_langs)
     else:
@@ -126,7 +126,7 @@ def main():
         if nb_dev == 0:
             assert nb_test == 0
             # No dev or test sentences to sample
-            for i, (text,url) in enumerate(stream_sents(lang)):
+            for i, (text,text_id,url) in enumerate(stream_sents(lang)):
                 f_train.write(build_example(text, lang) + "\n")
             continue
         
@@ -150,7 +150,7 @@ def main():
         nb_dev_written = 0
         nb_test_written = 0
         only_train_left = False
-        for i, (text,url) in enumerate(stream_sents(lang)):
+        for i, (text,text_id,url) in enumerate(stream_sents(lang)):
             if only_train_left:
                 f_train.write(build_example(text, lang) + "\n")
                 continue

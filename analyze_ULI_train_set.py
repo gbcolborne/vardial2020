@@ -35,7 +35,7 @@ def analyze_corpus_sizes(langs):
     print()
     for i, lang in enumerate(langs):            
         print("{}/{}. {}".format(i+1, len(langs), lang))
-        nb_sents = sum(1 for (text, url) in stream_sents(lang))
+        nb_sents = sum(1 for (text, text_id, url) in stream_sents(lang))
         corpus_sizes.append(nb_sents)
     size_fd = Counter(corpus_sizes)
     print_title_with_border("Corpus size (freq)")    
@@ -53,7 +53,7 @@ def analyze_alphabet_sizes(langs):
         print("{}/{}. {}".format(i+1, len(langs), lang))
 
         text = ""
-        for (t, url) in stream_sents(lang):
+        for (t, _, url) in stream_sents(lang):
             text += t
         alphabet_fd = Counter(text)            
         alphabet_sizes.append(len(alphabet_fd))
@@ -76,7 +76,7 @@ def analyze_text_lengths(langs):
     text_lengths = []
     max_length_thresholds = [64, 128, 256, 512]
     for i, lang in enumerate(langs):            
-        lengths = [len(text) for (text, url) in stream_sents(lang)]
+        lengths = [len(text) for (text, _, url) in stream_sents(lang)]
         title = "{}/{}. {}".format(i+1, len(langs), lang)
         print_title_with_border(title)
         print_stats(lengths, max_thresholds=max_length_thresholds)        
@@ -101,7 +101,7 @@ def analyze_duplicate_texts(langs):
         nb_sents = 0
         nb_dups = [0 for _ in max_lengths]
         sents = [set() for _ in max_lengths]
-        for j, (text, url) in enumerate(stream_sents(lang)):
+        for j, (text, _, url) in enumerate(stream_sents(lang)):
             nb_sents += 1
             for k, m in enumerate(max_lengths):
                 if m is None:
@@ -126,7 +126,7 @@ def analyze_duplicate_texts(langs):
 def analyze_urls(langs):
     urls = []
     for i, lang in enumerate(langs):
-        urls.append([u for t,u in stream_sents(lang)])
+        urls.append([u for t,_,u in stream_sents(lang)])
         print("{}/{}. {}".format(i+1, len(langs), lang))
 
     # Map URLs to langs. Do same for top-level domains (generic and country code). 
@@ -167,7 +167,7 @@ def analyze_words_chars_urls(langs):
         word2freq = defaultdict(int)
         uniq_urls = set()
         nb_sents = 0
-        for (text, url) in stream_sents(lang):
+        for (text, _, url) in stream_sents(lang):
             nb_sents += 1
             if url:
                 uniq_urls.add(url)
