@@ -87,7 +87,7 @@ def string_to_data(string, frmt, lang=None):
         
     if frmt == "custom":
         # Custom format for labeled data
-        elems = string.rstrip().split("\t")
+        elems = string.strip().split("\t")
         assert len(elems) == 3
         text = elems[0]
         lang = elems[1]
