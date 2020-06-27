@@ -90,7 +90,22 @@ def analyze_text_lengths(langs):
     print_stats(all_text_lengths)
     for threshold in [64,128,256,512]:
         print_count_gt_threshold(all_text_lengths, threshold)
+
         
+def analyze_duplicate_texts(langs):
+    for i,lang in enumerate(langs):
+        print("\n{}/{}. {}".format(i+1, len(langs), lang))
+        sents = set()
+        nb_sents = 0
+        nb_dups = 0        
+        for j,(t,url) in enumerate(stream_sents(lang)):
+            nb_sents += 1
+            if t in sents:
+                nb_dups += 1
+            else:
+                sents.add(t)
+        print("# dups: %d/%d" % (nb_dups, nb_sents))
+    return
 
 def analyze_urls(langs):
     urls = []
@@ -170,11 +185,12 @@ def analyze_words_chars_urls(langs):
         print_stats(vals)
     return
 
+
     
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("langs", choices=["french", "confounders", "relevant", "irrelevant", "irrelevant-without-confounders", "all"])
-    parser.add_argument("analysis", choices=["corpus-sizes", "text-lengths", "alphabet-sizes", "words-chars-urls", "urls-in-depth"])
+    parser.add_argument("analysis", choices=["corpus-sizes", "text-lengths", "duplicate-texts", "alphabet-sizes", "words-chars-urls", "urls-in-depth"])
     args = parser.parse_args()
     if args.analysis == "urls-in-depth":
         assert args.langs == "relevant"
@@ -206,6 +222,8 @@ def main():
         analyze_corpus_sizes(langs)
     elif args.analysis == "text-lengths":
         analyze_text_lengths(langs)
+    elif args.analysis == "duplicate-texts":
+        analyze_duplicate_texts(langs)
     elif args.analysis == "alphabet-sizes":
         analyze_alphabet_sizes(langs)
     elif args.analysis == "words-chars-urls":
