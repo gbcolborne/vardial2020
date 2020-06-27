@@ -75,8 +75,8 @@ def string_to_data(string, frmt, lang=None):
         if lang in RELEVANT_LANGS:
             # Last space separated token is the source URL
             cut = string.rstrip().rfind(" ")
-            text = line[:cut]
-            url = line[cut+1:]
+            text = string[:cut]
+            url = string[cut+1:]
             assert url.startswith("http")
             return (text, None, url, lang)
         else:
