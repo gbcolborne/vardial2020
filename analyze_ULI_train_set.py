@@ -93,19 +93,35 @@ def analyze_text_lengths(langs):
 
         
 def analyze_duplicate_texts(langs):
-    for i,lang in enumerate(langs):
+    max_lengths = [None, 256, 128]    
+    all_nb_dups = [0 for _ in max_lengths]
+    total_sents = 0
+    for i, lang in enumerate(langs):
         print("\n{}/{}. {}".format(i+1, len(langs), lang))
-        sents = set()
         nb_sents = 0
-        nb_dups = 0        
-        for j,(t,url) in enumerate(stream_sents(lang)):
+        nb_dups = [0 for _ in max_lengths]
+        sents = [set() for _ in max_lengths]
+        for j, (text, url) in enumerate(stream_sents(lang)):
             nb_sents += 1
-            if t in sents:
-                nb_dups += 1
-            else:
-                sents.add(t)
-        print("# dups: %d/%d" % (nb_dups, nb_sents))
+            for k, m in enumerate(max_lengths):
+                if m is None:
+                    truncated = text
+                else:
+                    truncated = text[:m]
+                if truncated in sents[k]:
+                    nb_dups[k] += 1
+                else:
+                    sents[k].add(truncated)
+        for j, m in enumerate(max_lengths):
+            all_nb_dups[j] += nb_dups[j]
+            print("# dups (max_length=%s): %d/%d" % (str(m), nb_dups[j], nb_sents))
+        total_sents += nb_sents
+        
+    print_title_with_border("Summary")
+    for j, m in enumerate(max_lengths):
+        print("# dups (max_length=%s): %d/%d" % (str(m), all_nb_dups[j], total_sents))
     return
+
 
 def analyze_urls(langs):
     urls = []
