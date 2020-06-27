@@ -88,14 +88,14 @@ def string_to_data(string, frmt, lang=None):
     if frmt == "custom":
         # Custom format for labeled data
         elems = string.rstrip().split("\t")
-        assert len(elems) == 3:
+        assert len(elems) == 3
         text = elems[0]
         lang = elems[1]
         if lang in RELEVANT_LANGS:
             url = elems[2]
             text_id = None
         else:
-            text_id = elems[2]
+            text_id = int(elems[2])
             url = None
         return (text, text_id, url, lang)
         
