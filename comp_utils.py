@@ -16,11 +16,23 @@ IRRELEVANT_URALIC_LANGS = set(['ekk', 'fin', 'hun'])
 # Path of directory containing ULI training data
 DIR_ULI_TRAIN = "data/ULI_training_data/ULI2020_training"
 
+# Formats used for writing/parsing data
+DATA_FORMATS = ["source", "custom"]
 
-def format_example(text, lang, url=None, text_id=None, label=None):
-    """ Given a text, return a string corresponding to the format used in the ULI training data package, unless label is provided, in which we use a custom format. """
-    # A few checks to make sure we have the data necessary to produce
-    # format used in ULI training data package
+
+def data_to_string(text, lang, frmt, url=None, text_id=None, label=None):
+    """ Convert data to string.
+
+    Args:
+    - text
+    - lang
+    - frmt: format
+    - url
+    - text_id
+    - label
+
+    """
+    assert frmt in DATA_FORMATS
     if lang in RELEVANT_LANGS:
         assert url is not None
     else:
@@ -28,20 +40,65 @@ def format_example(text, lang, url=None, text_id=None, label=None):
         assert type(text_id) == int
 
     # Execute
-    if label is None:
-        # Use format of ULI training data package
+    if frmt == "source":
+        # This is the format used in the source package containing the
+        # ULI training data
         if lang in RELEVANT_LANGS:
             return "%s %s\n" % (text, url)
         else:
             return "%d\t%s\n" % (text_id, text)
-    else:
-        # Use custom format for labeled data
+        
+    if frmt == "custom":
+        # Custom format for labeled data
         if lang in RELEVANT_LANGS:
             return "%s\t%s\t%s\n" % (text, label, url)
         else:
             return "%s\t%s\t%s\n" % (text, label, text_id)
-        
 
+        
+def string_to_data(string, lang, frmt):
+    """ Parse a line from the dataset.
+
+    Args:
+    - string
+    - lang
+    - frmt: format
+
+
+    Returns: (text, text_id, url, lang)
+
+    """
+    assert frmt in DATA_FORMATS
+    if frmt == "source":
+        # This is the format used in the source package containing the
+        # ULI training data
+        if lang in RELEVANT_LANGS:
+            # Last space separated token is the source URL
+            cut = string.rstrip().rfind(" ")
+            text = line[:cut]
+            url = line[cut+1:]
+            assert url.startswith("http")
+            return (text, None, url, lang)
+        else:
+            text_id, text = string.split("\t")
+            text = text.strip()
+            text_id = int(text_id)
+            return (text, text_id, None, lang)
+        
+    if frmt == "custom":
+        # Custom format for labeled data
+        elems = string.rstrip().split("\t")
+        assert len(elems) == 3:
+        text = elems[0]
+        lang = elems[1]
+        if lang in RELEVANT_LANGS:
+            url = elems[2]
+            text_id = None
+        else:
+            text_id = elems[2]
+            url = None
+        return (text, text_id, url, lang)
+        
 def map_ULI_langs_to_paths():
     """ For ULI task, map languages to path of file containing the corresponding training data. 
 
@@ -68,19 +125,8 @@ def get_path_for_lang(lang):
 
 def extract_text_id_and_url(line, lang):
     """Extract text from a line extracted from one of the training files. """
-    if lang in RELEVANT_LANGS:
-        # Last space separated token is the source URL
-        cut = line.rstrip().rfind(" ")
-        text = line[:cut]
-        url = line[cut+1:]
-        assert url.startswith("http")
-        return (text, None, url)
-    else:
-        line_number, text = line.split("\t")
-        text = text.strip()
-        text_id = int(line_number)
-        return (text, text_id, None)
-
+    text, text_id, url = string_to_data(line, lang, "source")
+    return (text, text_id, url)
 
 def stream_sents(lang):
     """Stream sentences (along with their URL) from training data. Skip empty lines."""
