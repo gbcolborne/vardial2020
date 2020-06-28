@@ -35,9 +35,6 @@ def disambig(dir_out, max_length=None):
                     data.append((text,text_id,url))
             for (text, text_id, url) in data: 
                 line = data_to_string(text, lang, "custom", url=url, text_id=text_id, label=lang)
-                if not len(line.strip()):
-                    print("what's up?")
-                    print(line)
                 f.write(line)
                 line_count += 1
             lang_fd[lang] = len(data)
@@ -58,17 +55,19 @@ def disambig(dir_out, max_length=None):
     # Check if we skipped labeling and sorting
     if lang_fd is None:
         lang_fd = {}
+        line_count = 0
         with open(path_lang_fd) as f:
             for line in f:
                 elems = line.strip().split("\t")
                 lang = elems[0]
-                freq = elems[1]
+                freq = int(elems[1])
                 lang_fd[lang] = freq
-        
+                line_count += freq
+                
     # Read in sorted dataset, look for duplicate texts, write disambiguated dataset
     lang2outfile = {lang:open(os.path.join(dir_out, lang2filename[lang]), 'w') for lang in langs}
     prev_text = None
-    prev_labels = []
+    prev_info = []
     lines_processed = 0
     confusion = {}
     print("\nDisambiguating... ")    
@@ -77,21 +76,29 @@ def disambig(dir_out, max_length=None):
             if not len(line.strip()):
                 continue
             (text, text_id, url, lang) = string_to_data(line, "custom", lang=None)
-            if text == prev_text:
-                prev_labels.append(lang)
+            if text == prev_text:                
+                prev_info.append((lang, text_id, url))
             else:
                 if prev_text is not None:
                     # Disambiguate previous text and write to output file for the language we picked
-                    sampled_lang = sorted(prev_labels, key=lang_fd.get, reverse=False)[0]
-                    output = data_to_string(text, sampled_lang, "source", url=url, text_id=text_id, label=None)
+                    ix = None
+                    min_lang_freq = 1e10
+                    for j, (x, y, z) in enumerate(prev_info):
+                        freq = lang_fd[x]
+                        if freq < min_lang_freq:
+                            min_lang_freq = freq
+                            ix = j
+                    (slang, stext_id, surl) = prev_info[ix]
+                    output = data_to_string(text, slang, "source", url=surl, text_id=stext_id, label=None)
                     lang2outfile[lang].write(output)
                     # Store confusion counts
-                    for (x,y) in combinations(prev_labels, 2):
-                        if (x,y) not in combinations:
-                            combinations[(x,y)] = 0
+                    langs = [x for (x,y,z) in prev_info]
+                    for (x,y) in combinations(langs, 2):
+                        if (x,y) not in confusion:
+                            confusion[(x,y)] = 0
                         confusion[(x,y)] += 1
                 prev_text = text
-                prev_labels = [lang]
+                prev_info = [(lang, text_id, url)]
             if (i+1) % 1000000 == 0:
                 pct = 100 * (i+1) / line_count
                 print("# texts processed: %d/%d (%.1f%%)" % (i+1, line_count, pct))
