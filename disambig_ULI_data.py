@@ -90,10 +90,9 @@ def disambig(dir_out, max_length=None):
                             ix = j
                     (slang, stext_id, surl) = prev_info[ix]
                     output = data_to_string(text, slang, "source", url=surl, text_id=stext_id, label=None)
-                    lang2outfile[lang].write(output)
+                    lang2outfile[slang].write(output)
                     # Store confusion counts
-                    langs = [x for (x,y,z) in prev_info]
-                    for (x,y) in combinations(langs, 2):
+                    for (x,y) in combinations([x for (x,y,z) in prev_info], 2):
                         if (x,y) not in confusion:
                             confusion[(x,y)] = 0
                         confusion[(x,y)] += 1
