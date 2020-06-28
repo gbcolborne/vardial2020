@@ -1,7 +1,7 @@
 import argparse
 from sklearn.metrics import precision_recall_fscore_support as prfs
 from sklearn.metrics import multilabel_confusion_matrix as mcm
-from comp_utils import map_ULI_langs_to_paths, RELEVANT_LANGS
+from comp_utils import ALL_LANGS, RELEVANT_LANGS
 
 def load_labels(path, lang2id):
     with open(path) as f:
@@ -25,7 +25,7 @@ def main():
     args = parser.parse_args()
 
     # Load languages
-    all_langs = sorted(map_ULI_langs_to_paths().keys())
+    all_langs = sorted(ALL_LANGS)
     rel_langs = set(RELEVANT_LANGS)
     
     # Map all languages to an integer class ID

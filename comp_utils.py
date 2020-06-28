@@ -3,6 +3,27 @@
 import os, glob
 from collections import OrderedDict
 
+# Irrelevant langs for ULI task (including 3 confounding Uralic laguages)
+IRRELEVANT_LANGS = set(['afr','als','amh','ara','asm','azj','bak','bar',
+                        'bcl','bel','ben','bos','bpy','bre','bul','cat',
+                        'ceb','ces','che','chv','cmn','cos','cym','dan',
+                        'deu','diq','div','ekk','ell','eng','epo','eus',
+                        'ext','fao','fin','fra','fry','gle','glg','glv',
+                        'gom','grn','gsw','guj','hat','heb','hif','hin',
+                        'hrv','hsb','hun','ido','ilo','ina','ind','isl',
+                        'ita','jav','jpn','kal','kan','kat','kaz','kir',
+                        'kor','krc','ksh','lat','lav','lim','lit','lmo',
+                        'ltz','lug','lus','mal','mar','min','mkd','mlg',
+                        'mlt','mon','mri','mwl','mzn','nds','nep','new',
+                        'nld','nno','nob','nso','oci','ori','oss','pam',
+                        'pan','pes','pfl','pms','pnb','pol','por','pus',
+                        'que','roh','ron','rus','sah','scn','sco','sgs',
+                        'sin','slk','slv','sna','som','sot','spa','srd',
+                        'srp','sun','swa','swe','tam','tat','tel','tgk',
+                        'tgl','tha','tso','tuk','tur','uig','ukr','urd',
+                        'uzn','vec','vie','vls','vol','wln','wuu','xho',
+                        'xmf','yid','zea','zsm','zul'])
+
 # Relevant langs for ULI task
 RELEVANT_LANGS = set(['fit', 'fkv', 'izh', 'kca', 'koi', 'kpv', 'krl',
                       'liv', 'lud', 'mdf', 'mhr', 'mns', 'mrj', 'myv',
@@ -13,8 +34,8 @@ RELEVANT_LANGS = set(['fit', 'fkv', 'izh', 'kca', 'koi', 'kpv', 'krl',
 # Irrelevant Uralic languages for ULI task
 IRRELEVANT_URALIC_LANGS = set(['ekk', 'fin', 'hun'])
 
-# Path of directory containing ULI training data
-DIR_ULI_TRAIN = "data/ULI_training_data/ULI2020_training"
+# All langs for ULI task
+ALL_LANGS = IRRELEVANT_LANGS.union(RELEVANT_LANGS)
 
 # Formats used for writing/parsing data
 DATA_FORMATS = ["source", "custom"]
@@ -100,25 +121,26 @@ def string_to_data(string, frmt, lang=None):
             url = None
         return (text, text_id, url, lang)
         
-def map_ULI_langs_to_paths():
+def map_ULI_langs_to_paths(dir_training_data):
     """ For ULI task, map languages to path of file containing the corresponding training data. 
 
     Args:
+    - dir_training_data
 
     Returns: OrderedDict
 
     """
     lang2path = OrderedDict()
-    for filename in os.listdir(DIR_ULI_TRAIN):
+    for filename in os.listdir(dir_training_data):
         # 3 first chars are the language code
         lang = filename[:3]
-        lang2path[lang] = os.path.join(DIR_ULI_TRAIN, filename)
+        lang2path[lang] = os.path.join(dir_training_data, filename)
     return lang2path
 
 
-def get_path_for_lang(lang):
+def get_path_for_lang(lang, dir_training_data):
     """ Infer path of training data for language. """
-    pattern = "%s/%s*" % (DIR_ULI_TRAIN, lang)
+    pattern = "%s/%s*" % (dir_training_data, lang)
     paths = glob.glob(pattern)
     path = paths[0]
     return path
@@ -129,9 +151,9 @@ def extract_text_id_and_url(line, lang):
     text, text_id, url, lang = string_to_data(line, "source", lang=lang)
     return (text, text_id, url)
 
-def stream_sents(lang):
+def stream_sents(lang, dir_training_data):
     """Stream sentences (along with their URL) from training data. Skip empty lines."""
-    path = get_path_for_lang(lang)
+    path = get_path_for_lang(lang, dir_training_data)
     with open(path) as f:
         for line in f:
             text, text_id, url = extract_text_id_and_url(line, lang)

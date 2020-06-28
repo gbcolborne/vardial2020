@@ -30,12 +30,12 @@ def print_count_gt_threshold(vals, threshold):
     print("- # texts with length > {}: {} ({:.2f}%)".format(threshold, count, pct))
 
 
-def analyze_corpus_sizes(langs):
+def analyze_corpus_sizes(langs, dir_training_data):
     corpus_sizes = []
     print()
     for i, lang in enumerate(langs):            
         print("{}/{}. {}".format(i+1, len(langs), lang))
-        nb_sents = sum(1 for (text, text_id, url) in stream_sents(lang))
+        nb_sents = sum(1 for (text, text_id, url) in stream_sents(lang, dir_training_data))
         corpus_sizes.append(nb_sents)
     size_fd = Counter(corpus_sizes)
     print_title_with_border("Corpus size (freq)")    
@@ -45,7 +45,7 @@ def analyze_corpus_sizes(langs):
     print_stats(list(corpus_sizes))    
 
 
-def analyze_alphabet_sizes(langs):
+def analyze_alphabet_sizes(langs, dir_training_data):
     alphabet_sizes = []
     super_alphabet_fd = {}
     print()
@@ -53,7 +53,7 @@ def analyze_alphabet_sizes(langs):
         print("{}/{}. {}".format(i+1, len(langs), lang))
 
         text = ""
-        for (t, _, url) in stream_sents(lang):
+        for (t, _, url) in stream_sents(lang, dir_training_data):
             text += t
         alphabet_fd = Counter(text)            
         alphabet_sizes.append(len(alphabet_fd))
@@ -72,11 +72,11 @@ def analyze_alphabet_sizes(langs):
         print("- Nb chars in super-alphabet with freq <= %d: %d/%d" % (max_freq, n, len(super_alphabet_fd)))
         
     
-def analyze_text_lengths(langs):
+def analyze_text_lengths(langs, dir_training_data):
     text_lengths = []
     max_length_thresholds = [64, 128, 256, 512]
     for i, lang in enumerate(langs):            
-        lengths = [len(text) for (text, _, url) in stream_sents(lang)]
+        lengths = [len(text) for (text, _, url) in stream_sents(lang, dir_training_data)]
         title = "{}/{}. {}".format(i+1, len(langs), lang)
         print_title_with_border(title)
         print_stats(lengths, max_thresholds=max_length_thresholds)        
@@ -92,7 +92,7 @@ def analyze_text_lengths(langs):
         print_count_gt_threshold(all_text_lengths, threshold)
 
         
-def analyze_duplicate_texts(langs):
+def analyze_duplicate_texts(langs, dir_training_data):
     max_lengths = [None, 256, 128]    
     all_nb_dups = [0 for _ in max_lengths]
     total_sents = 0
@@ -101,7 +101,7 @@ def analyze_duplicate_texts(langs):
         nb_sents = 0
         nb_dups = [0 for _ in max_lengths]
         sents = [set() for _ in max_lengths]
-        for j, (text, _, url) in enumerate(stream_sents(lang)):
+        for j, (text, _, url) in enumerate(stream_sents(lang, dir_training_data)):
             nb_sents += 1
             for k, m in enumerate(max_lengths):
                 if m is None:
@@ -123,10 +123,10 @@ def analyze_duplicate_texts(langs):
     return
 
 
-def analyze_urls(langs):
+def analyze_urls(langs, dir_training_data):
     urls = []
     for i, lang in enumerate(langs):
-        urls.append([u for t,_,u in stream_sents(lang)])
+        urls.append([u for t,_,u in stream_sents(lang, dir_training_data)])
         print("{}/{}. {}".format(i+1, len(langs), lang))
 
     # Map URLs to langs. Do same for top-level domains (generic and country code). 
@@ -158,7 +158,7 @@ def analyze_urls(langs):
             print(" %d. %s: %s" % (i+1, key, lang_str))
 
 
-def analyze_words_chars_urls(langs):
+def analyze_words_chars_urls(langs, dir_training_data):
     vocab_sizes = []
     alphabet_sizes = []
     spu_ratios = []
@@ -167,7 +167,7 @@ def analyze_words_chars_urls(langs):
         word2freq = defaultdict(int)
         uniq_urls = set()
         nb_sents = 0
-        for (text, _, url) in stream_sents(lang):
+        for (text, _, url) in stream_sents(lang, dir_training_data):
             nb_sents += 1
             if url:
                 uniq_urls.add(url)
@@ -202,9 +202,9 @@ def analyze_words_chars_urls(langs):
     return
 
 
-    
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument("dir_training_data", help="Path of directory containing training data")
     parser.add_argument("langs", choices=["french", "confounders", "relevant", "irrelevant", "irrelevant-without-confounders", "all"])
     parser.add_argument("analysis", choices=["corpus-sizes", "text-lengths", "duplicate-texts", "alphabet-sizes", "words-chars-urls", "urls-in-depth"])
     args = parser.parse_args()
@@ -212,7 +212,7 @@ def main():
         assert args.langs == "relevant"
         
     # Get all languages and their path
-    lang2path = map_ULI_langs_to_paths()
+    lang2path = map_ULI_langs_to_paths(args.dir_training_data)
 
     # Check which languages we are processing
     if args.langs == "all":
@@ -235,17 +235,17 @@ def main():
 
     # Run
     if args.analysis == "corpus-sizes":
-        analyze_corpus_sizes(langs)
+        analyze_corpus_sizes(langs, args.dir_training_data)
     elif args.analysis == "text-lengths":
-        analyze_text_lengths(langs)
+        analyze_text_lengths(langs, args.dir_training_data)
     elif args.analysis == "duplicate-texts":
-        analyze_duplicate_texts(langs)
+        analyze_duplicate_texts(langs, args.dir_training_data)
     elif args.analysis == "alphabet-sizes":
-        analyze_alphabet_sizes(langs)
+        analyze_alphabet_sizes(langs, args.dir_training_data)
     elif args.analysis == "words-chars-urls":
-        analyze_words_chars_urls(langs)
+        analyze_words_chars_urls(langs, args.dir_training_data)
     elif args.analysis == "urls-in-depth":
-        analyze_urls(langs)
+        analyze_urls(langs, args.dir_training_data)
     print("\n\n")
     return
 

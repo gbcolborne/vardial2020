@@ -34,6 +34,7 @@ def main():
                         help="Balance the 3 confounding languages (i.e. irrelevant Uralic)")
     parser.add_argument("--balance-irr", action="store_true",
                         help="Balance the 146 irrelevant languages (excluding Uralic confounders)")
+    parser.add_argument("input_dir", help="Path of directory containing training data")
     parser.add_argument("output_dir")
     args = parser.parse_args()
     
@@ -53,7 +54,7 @@ def main():
     random.seed(91500)
 
     # Get all langs
-    langs = sorted(map_ULI_langs_to_paths().keys())
+    langs = sorted(map_ULI_langs_to_paths(args.input_dir).keys())
     rel_langs = sorted(RELEVANT_LANGS)
     con_langs = sorted(IRRELEVANT_URALIC_LANGS)
     irr_langs = sorted(set(langs).difference(rel_langs + con_langs))
@@ -68,7 +69,7 @@ def main():
     lang2freq = {}
     for lang in langs:
         logger.info("  " + lang)
-        lang2freq[lang] = sum(1 for (sent, text_id, url) in stream_sents(lang))
+        lang2freq[lang] = sum(1 for (sent, text_id, url) in stream_sents(lang, args.input_dir))
     if args.balance_rel:
         rel_probs = np.ones(len(rel_langs), dtype=float) / len(rel_langs)
     else:
@@ -126,7 +127,7 @@ def main():
         if nb_dev == 0:
             assert nb_test == 0
             # No dev or test sentences to sample
-            for i, (text,text_id,url) in enumerate(stream_sents(lang)):
+            for i, (text,text_id,url) in enumerate(stream_sents(lang, args.input_dir)):
                 f_train.write(build_example(text, lang) + "\n")
             continue
         
@@ -150,7 +151,7 @@ def main():
         nb_dev_written = 0
         nb_test_written = 0
         only_train_left = False
-        for i, (text,text_id,url) in enumerate(stream_sents(lang)):
+        for i, (text,text_id,url) in enumerate(stream_sents(lang, args.input_dir)):
             if only_train_left:
                 f_train.write(build_example(text, lang) + "\n")
                 continue

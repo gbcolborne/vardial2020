@@ -4,12 +4,12 @@ import os, argparse, subprocess
 from comp_utils import map_ULI_langs_to_paths, stream_sents, data_to_string, string_to_data, RELEVANT_LANGS, IRRELEVANT_URALIC_LANGS
 from itertools import combinations
 
-def disambig(dir_out, max_length=None):
+def disambig(dir_in, dir_out, max_length=None):
     # Check args
     if not os.path.exists(dir_out):
         os.makedirs(dir_out)
 
-    lang2path = map_ULI_langs_to_paths()
+    lang2path = map_ULI_langs_to_paths(dir_in)
     lang2filename = {x:os.path.split(y)[-1] for (x,y) in lang2path.items()}
     langs = sorted(lang2path.keys())
     
@@ -27,7 +27,7 @@ def disambig(dir_out, max_length=None):
             # Apply length cutoff and deduplicate
             uniq_sents = set()
             data = []
-            for (text, text_id, url) in stream_sents(lang):
+            for (text, text_id, url) in stream_sents(lang, dir_in):
                 if max_length is not None:
                     text = text[:max_length]
                 if text not in uniq_sents:
@@ -131,10 +131,11 @@ def disambig(dir_out, max_length=None):
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument("input_dir", help="Path of input directory (containing training data)")    
     parser.add_argument("output_dir", help="Path of output directory")
     parser.add_argument("--max_text_length", type=int)
     args = parser.parse_args()
-    disambig(args.output_dir, max_length=args.max_text_length)
+    disambig(args.input_dir, args.output_dir, max_length=args.max_text_length)
     return
     
     
