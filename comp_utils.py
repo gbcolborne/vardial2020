@@ -74,7 +74,8 @@ def string_to_data(string, frmt, lang=None):
         assert lang is not None
         if lang in RELEVANT_LANGS:
             # Last space separated token is the source URL
-            cut = string.rstrip().rfind(" ")
+            string = string.strip()
+            cut = string.rfind(" ")
             text = string[:cut]
             url = string[cut+1:]
             assert url.startswith("http")
