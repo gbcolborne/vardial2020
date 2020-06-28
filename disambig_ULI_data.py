@@ -106,12 +106,9 @@ def disambig(dir_out, max_length=None):
     for (lang, outfile) in lang2outfile.items():
         outfile.close()
 
-    
     # Clean up.
-    cmd = ["rm", path_tmp]
-    subprocess.run(cmd)
-    cmd = ["rm", path_sorted]
-    subprocess.run(cmd)
+    for path in [path_tmp, path_sorted, path_lang_fd]:
+        subprocess.run(["rm", path])
 
     # Print some stats on pairwise confusion
     print("\n\nConfusion frequencies:")
