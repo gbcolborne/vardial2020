@@ -55,8 +55,8 @@ def line_to_data(line, is_labeled):
     if is_labeled:
         elems = line.strip().split("\t")
         assert len(elems) == 2
-        label = 
-        return (elems[0], )        
+        text = elems[0]
+        label = elems[1]
     else:
         text = line.strip()
         label = None
@@ -433,16 +433,6 @@ def main():
         config.vocab_size = len(tokenizer.vocab)
         print("Size of vocab: {}".format(len(tokenizer.vocab)))
     
-    # Get training data
-    num_train_steps = None
-    max_seq_length = config.max_position_embeddings
-    if args.do_train:        
-        print("Preparing dataset using data from %s" % args.train_file)
-        train_dataset = BERTDataset(args.train_file, tokenizer, seq_len=max_seq_length,
-                                    nb_corpus_lines=None, on_memory=args.on_memory)
-        num_train_steps = int(len(train_dataset) / args.train_batch_size / args.gradient_accumulation_steps) * args.num_train_epochs
-        if args.local_rank != -1:
-            num_train_steps = num_train_steps // torch.distributed.get_world_size()
             
     # Prepare model
     if pretrained:
@@ -475,6 +465,19 @@ def main():
                       correct_bias=True) # To reproduce BertAdam specific behaviour, use correct_bias=False
     scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=args.num_warmup_steps, num_training_steps=num_train_steps)
 
+
+    # Get training data
+    num_train_steps = None
+    max_seq_length = config.max_position_embeddings
+    if args.do_train:        
+        print("Preparing dataset using data from %s" % path_train_data)
+        train_dataset = BERTDataset(path_train_data, tokenizer, seq_len=max_seq_length,
+                                    nb_corpus_lines=None, on_memory=args.on_memory)
+        num_train_steps = int(len(train_dataset) / args.train_batch_size / args.gradient_accumulation_steps) * args.num_train_epochs
+        if args.local_rank != -1:
+            num_train_steps = num_train_steps // torch.distributed.get_world_size()
+
+    
     # Prepare training log
     output_log_file = os.path.join(args.output_dir, "training_log.txt")
     with open(output_log_file, "w") as f:
