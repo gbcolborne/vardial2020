@@ -15,7 +15,7 @@
 # limitations under the License.
 
 """
-Pre-train BERT on masked language model task at character-level.
+Pre-train BERT.
 
 Code based on: https://github.com/huggingface/pytorch-pretrained-BERT/blob/master/examples/run_lm_finetuning.py.
 
@@ -27,8 +27,9 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset, RandomSampler
 from torch.utils.data.distributed import DistributedSampler
-from pytorch_pretrained_bert.modeling import BertForMaskedLM, BertConfig, WEIGHTS_NAME, CONFIG_NAME
-from pytorch_pretrained_bert.optimization import BertAdam, warmup_linear
+from transformers import BertForMaskedLM, BertConfig, WEIGHTS_NAME, CONFIG_NAME
+from transformers import AdamW
+from transformers.optimization import get_linear_schedule_with_warmup
 from tqdm import tqdm, trange
 
 from CharTokenizer import CharTokenizer
@@ -317,11 +318,10 @@ def main():
                         default=3.0,
                         type=float,
                         help="Total number of training epochs to perform.")
-    parser.add_argument("--warmup_proportion",
-                        default=0.1,
-                        type=float,
-                        help="Proportion of training to perform linear learning rate warmup for. "
-                             "E.g., 0.1 = 10%% of training.")
+    parser.add_argument("--warmup_steps"
+                        default=0,
+                        type=int,
+                        help="Number of training steps to perform linear learning rate warmup for. ")
     parser.add_argument("--on_memory",
                         action='store_true',
                         help="Whether to load train samples into memory or use disk")
@@ -341,14 +341,6 @@ def main():
                         type=int,
                         default=1,
                         help="Number of updates steps to accumualte before performing a backward/update pass.")
-    parser.add_argument('--fp16',
-                        action='store_true',
-                        help="Whether to use 16-bit float precision instead of 32-bit")
-    parser.add_argument('--loss_scale',
-                        type = float, default = 0,
-                        help = "Loss scaling to improve fp16 numeric stability. Only used when fp16 set to True.\n"
-                        "0 (default value): dynamic loss scaling.\n"
-                        "Positive power of 2: static loss scaling value.\n")
 
     args = parser.parse_args()
 
@@ -383,8 +375,8 @@ def main():
         n_gpu = 1
         # Initializes the distributed backend which will take care of sychronizing nodes/GPUs
         torch.distributed.init_process_group(backend='nccl')
-    logger.info("device: {} n_gpu: {}, distributed training: {}, 16-bits training: {}".format(
-        device, n_gpu, bool(args.local_rank != -1), args.fp16))
+    logger.info("device: {} n_gpu: {}, distributed training: {}".format(
+        device, n_gpu, bool(args.local_rank != -1)))
 
     # Check some other args
     if args.gradient_accumulation_steps < 1:
@@ -407,18 +399,11 @@ def main():
     if not os.path.exists(args.output_dir):
         os.makedirs(args.output_dir)
 
-    # Make tokenizer
+    # Load tokenizer
     if pretrained:
         fp = os.path.join(args.bert_model_or_config_file, "tokenizer.pkl")
         with open(fp, "rb") as f:
             tokenizer = pickle.load(f)
-    else:
-        training_data = [line.strip() for line in open(args.train_file).readlines()]
-        tokenizer = CuneiformCharTokenizer(training_data=training_data)
-        tokenizer.trim_vocab(config.min_freq)
-        # Adapt vocab size in config
-        config.vocab_size = len(tokenizer.vocab)
-    print("Size of vocab: {}".format(len(tokenizer.vocab)))
 
     # Get training data
     num_train_optimization_steps = None
@@ -431,19 +416,28 @@ def main():
         if args.local_rank != -1:
             num_train_optimization_steps = num_train_optimization_steps // torch.distributed.get_world_size()
 
+        training_data = [line.strip() for line in open(args.train_file).readlines()]
+        tokenizer = CharTokenizer()
+        # Train tokenizer
+        for i range(len(train_dataset)):
+            tokenizer.update_vocab(train_dataset.get_line(i))
+        tokenizer.trim_vocab(config.min_freq)
+        # Adapt vocab size in config
+        config.vocab_size = len(tokenizer.vocab)
+        print("Size of vocab: {}".format(len(tokenizer.vocab)))
+
+            
     # Prepare model
     if pretrained:
         model = BertForMaskedLM.from_pretrained(args.bert_model_or_config_file)
     else:
         model = BertForMaskedLM(config)
-    if args.fp16:
-        model.half()
     model.to(device)
     if args.local_rank != -1:
         try:
             from apex.parallel import DistributedDataParallel as DDP
         except ImportError:
-            raise ImportError("Please install apex from https://www.github.com/nvidia/apex to use distributed and fp16 training.")
+            raise ImportError("Please install apex from https://www.github.com/nvidia/apex to use distributed training.")
         model = DDP(model)
     elif n_gpu > 1:
         model = torch.nn.DataParallel(model, device_ids=device_ids)
@@ -455,28 +449,10 @@ def main():
         {'params': [p for n, p in param_optimizer if not any(nd in n for nd in no_decay)], 'weight_decay': 0.01},
         {'params': [p for n, p in param_optimizer if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
         ]
-
-    if args.fp16:
-        try:
-            from apex.optimizers import FP16_Optimizer
-            from apex.optimizers import FusedAdam
-        except ImportError:
-            raise ImportError("Please install apex from https://www.github.com/nvidia/apex to use distributed and fp16 training.")
-
-        optimizer = FusedAdam(optimizer_grouped_parameters,
-                              lr=args.learning_rate,
-                              bias_correction=False,
-                              max_grad_norm=1.0)
-        if args.loss_scale == 0:
-            optimizer = FP16_Optimizer(optimizer, dynamic_loss_scale=True)
-        else:
-            optimizer = FP16_Optimizer(optimizer, static_loss_scale=args.loss_scale)
-
-    else:
-        optimizer = BertAdam(optimizer_grouped_parameters,
-                             lr=args.learning_rate,
-                             warmup=args.warmup_proportion,
-                             t_total=num_train_optimization_steps)
+    optimizer = AdamW(optimizer_grouped_parameters,
+                      lr=args.learning_rate,
+                      correct_bias=True) # To reproduce BertAdam specific behaviour, use correct_bias=False
+    scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=args.num_warmup_steps, num_training_steps=num_train_optimization_steps)
 
     # Prepare training log
     output_log_file = os.path.join(args.output_dir, "training_log.txt")
@@ -507,27 +483,20 @@ def main():
             for step, batch in enumerate(tqdm(train_dataloader, desc="Iteration")):
                 batch = tuple(t.to(device) for t in batch)
                 input_ids, input_mask, segment_ids, lm_label_ids = batch
-                loss = model(input_ids, segment_ids, input_mask, lm_label_ids)
+                outputs = model(input_ids, segment_ids, input_mask, lm_label_ids)
+                loss = outputs[0]
                 if n_gpu > 1:
                     loss = loss.mean() # mean() to average on multi-gpu.
                 if args.gradient_accumulation_steps > 1:
                     loss = loss / args.gradient_accumulation_steps
-                if args.fp16:
-                    optimizer.backward(loss)
-                else:
-                    loss.backward()
+                loss.backward()
                 tr_loss += loss.item()
                 nb_tr_examples += input_ids.size(0)
                 nb_tr_steps += 1
                 if (step + 1) % args.gradient_accumulation_steps == 0:
-                    if args.fp16:
-                        # modify learning rate with special warm up BERT uses
-                        # if args.fp16 is False, BertAdam is used that handles this automatically
-                        lr_this_step = args.learning_rate * warmup_linear(global_step/num_train_optimization_steps, args.warmup_proportion)
-                        for param_group in optimizer.param_groups:
-                            param_group['lr'] = lr_this_step
                     optimizer.step()
                     optimizer.zero_grad()
+                    scheduler.step()
                     global_step += 1
             avg_loss = tr_loss / nb_tr_examples
 
@@ -540,11 +509,7 @@ def main():
             # Save model
             logger.info("** ** * Saving model ** ** * ")
             model_to_save = model.module if hasattr(model, 'module') else model  # Only save the model it-self
-            output_model_file = os.path.join(args.output_dir, WEIGHTS_NAME)
-            torch.save(model_to_save.state_dict(), output_model_file)
-            output_config_file = os.path.join(args.output_dir, CONFIG_NAME)
-            with open(output_config_file, 'w') as f:
-                f.write(model_to_save.config.to_json_string())
+            model_to_save.save_pretrained(args.output_dir)
             fn = os.path.join(args.output_dir, "tokenizer.pkl")
             with open(fn, "wb") as f:
                 pickle.dump(tokenizer, f)
