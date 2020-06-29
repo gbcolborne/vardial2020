@@ -23,9 +23,10 @@ class CharTokenizer():
         char2count = {}
         with open(path_vocab, encoding="utf-8") as f:
             for line in f:
-                elems = line.strip().split("\t")
+                elems = line.rstrip().split("\t")
                 assert len(elems) == 2
                 char = elems[0]
+                vocab[char] = len(vocab)
                 count = int(elems[1])
                 char2count[char] = count
         return vocab, char2count
