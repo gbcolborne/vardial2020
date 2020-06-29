@@ -307,11 +307,11 @@ def main():
                         type=str, 
                         required=True,
                         help="Directory containing pre-trained BERT model or path of configuration file (if no pre-training).")
-    parser.add_argument("--train_file",
+    parser.add_argument("--dir_train_data",
                         default=None,
                         type=str,
                         required=True,
-                        help="The input train corpus.")
+                        help="Path of a directory containing training data and vocab")
     parser.add_argument("--output_dir",
                         default=None,
                         type=str,
@@ -404,6 +404,12 @@ def main():
     args.train_batch_size = args.train_batch_size // args.gradient_accumulation_steps
     if not args.do_train:
         raise ValueError("Training is currently the only implemented execution option. Please set `do_train`.")
+    path_train_data = os.path.join(args.dir_train_data, "train.tsv")
+    assert os.path.exists(path_train_data)
+    if os.path.exists(args.output_dir) and os.listdir(args.output_dir):
+        raise ValueError("Output directory ({}) already exists and is not empty.".format(args.output_dir))
+    if not os.path.exists(args.output_dir):
+        os.makedirs(args.output_dir)
 
     # Seed RNGs
     random.seed(args.seed)
@@ -412,19 +418,15 @@ def main():
     if n_gpu > 0:
         torch.cuda.manual_seed_all(args.seed)
 
-    # Prepare output directory
-    if os.path.exists(args.output_dir) and os.listdir(args.output_dir):
-        raise ValueError("Output directory ({}) already exists and is not empty.".format(args.output_dir))
-    if not os.path.exists(args.output_dir):
-        os.makedirs(args.output_dir)
-
     # Load tokenizer
     if pretrained:
         fp = os.path.join(args.bert_model_or_config_file, "tokenizer.pkl")
         with open(fp, "rb") as f:
             tokenizer = pickle.load(f)
     else:
-        tokenizer = CharTokenizer(args.vocab_file)
+        path_vocab = os.path.join(args.dir_train_data, "vocab.txt")
+        assert os.path.exists(path_vocab)
+        tokenizer = CharTokenizer(path_vocab)
         if args.min_freq > 1:
             tokenizer.trim_vocab(args.min_freq)
         # Adapt vocab size in config

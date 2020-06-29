@@ -1,17 +1,18 @@
 """ Simple tokenizer that splits texts into characters. """
+from io import open
 
 class CharTokenizer():
-    def __init__(self):
+    def __init__(self, path_vocab):
         """Make tokenizer. 
 
         Args:
 
         """
-        self.vocab = self._init_vocab()
-        self.char2count = {}
+        self.vocab, self.char2count = self._init_vocab(path_vocab)
         return
 
-    def _init_vocab(self):
+    
+    def _init_vocab(self, path_vocab):
         vocab = {}
         vocab["[PAD]"] = len(vocab)
         vocab["[UNK]"] = len(vocab)
@@ -19,7 +20,15 @@ class CharTokenizer():
         vocab["[CLS]"] = len(vocab)
         vocab["[SEP]"] = len(vocab)
         vocab[" "] = len(vocab)
-        return vocab
+        char2count = {}
+        with open(path_vocab, encoding="utf-8") as f:
+            for line in f:
+                elems = line.strip().split("\t")
+                assert len(elems) == 2
+                char = elems[0]
+                count = int(elems[1])
+                char2count[char] = count
+        return vocab, char2count
 
     
     def update_vocab(self, text):
