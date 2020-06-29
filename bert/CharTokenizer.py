@@ -1,26 +1,17 @@
+""" Simple tokenizer that splits texts into characters. """
+
 class CharTokenizer():
-    def __init__(self, training_data=None):
-        """Make tokenizer. If training data is provided, then we compute the
-        character frequencies to enable trimming the vocabulary.
+    def __init__(self):
+        """Make tokenizer. 
 
         Args:
-        - training_data: list of texts.
 
         """
         self.vocab = self._init_vocab()
-        for i,char in enumerate(CUNEIFORM_CHARS):
-            self.vocab[char] = len(self.vocab)
-        self.char2count = None
-        if training_data:
-            self.char2count = {k:0 for k in self.vocab}
-            for text in training_data:
-                for char in text:
-                    if char not in self.vocab:
-                        msg = "Warning: encounter OOV char '{}' while counting chars.".format(char)
-                        print(msg)
-                    else:
-                        self.char2count[char] += 1
+        self.char2count = {}
+        return
 
+    
     def _init_vocab(self):
         vocab = {}
         vocab["[PAD]"] = len(vocab)
@@ -31,6 +22,17 @@ class CharTokenizer():
         vocab[" "] = len(vocab)
         return vocab
 
+    
+    def update_vocab(self, text):
+        """ Update vocab and character frequencies. """
+        for char in text:
+            if char not in self.vocab:
+                vocab[char] = len(vocab)
+                char2count[char] = 0
+            char2count[char] += 1
+        return
+
+    
     def trim_vocab(self, min_freq):
         if min_freq < 1:
             return
@@ -42,24 +44,15 @@ class CharTokenizer():
             if self.char2count[char] >= min_freq:
                 new_vocab[char] = len(new_vocab)
         self.vocab = new_vocab
+        return
 
+    
     def tokenize(self, chars):
         return [c if c in self.vocab else "[UNK]" for c in chars]
+
     
     def convert_tokens_to_ids(self, chars):
         return [self.vocab[c] if c in self.vocab else self.vocab["[UNK]"] for c in chars]
     
 
 
-def load_labeled_data(path):
-    """ Load labeled data """
-    texts = []
-    labels = []
-    with open(path) as f:
-        for line in f:
-            line = line.strip()
-            if len(line):
-                 text, label = line.split("\t")
-                 texts.append(text)
-                 labels.append(label)
-    return texts, labels
