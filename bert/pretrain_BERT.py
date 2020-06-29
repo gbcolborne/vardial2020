@@ -42,12 +42,26 @@ logging.basicConfig(format='%(asctime)s - %(levelname)s - %(name)s -   %(message
 logger = logging.getLogger(__name__)
 
 
-def line_to_data(line):
-    """ Takes a line from a labeled dataset, and returns the text and label. """
-    elems = line.strip().split("\t")
-    assert len(elems) == 2
-    return (elems[0], elems[1])
+def count_params(model):
+    count = 0
+    for p in model.parameters():
+         count += torch.prod(torch.tensor(p.size())).item()
+    return count
 
+
+def line_to_data(line, is_labeled):
+    """ Takes a line from a dataset (labeled or unlabeled), and returns the text and label. """
+    
+    if is_labeled:
+        elems = line.strip().split("\t")
+        assert len(elems) == 2
+        label = 
+        return (elems[0], )        
+    else:
+        text = line.strip()
+        label = None
+    return (text, label)
+    
 
 class BERTDataset(Dataset):
     
@@ -68,7 +82,7 @@ class BERTDataset(Dataset):
             self.nb_corpus_lines = 0
             with open(corpus_path, "r", encoding=encoding) as f:
                 for line in tqdm(f, desc="Loading Dataset", total=nb_corpus_lines):
-                    (text, label) = line_to_data(line)
+                    (text, label) = line_to_data(line, True)
                     if text is not None:
                         self.lines.append(line)
             self.nb_corpus_lines = len(self.lines)
@@ -79,7 +93,7 @@ class BERTDataset(Dataset):
                 with open(corpus_path, "r", encoding=encoding) as f:
                     self.nb_corpus_lines = 0
                     for line in tqdm(f, desc="Loading Dataset", total=nb_corpus_lines):
-                        (text, label) = line_to_data(line)
+                        (text, label) = line_to_data(line, True)
                         if text is not None:
                             self.nb_corpus_lines += 1
             self.file = open(corpus_path, "r", encoding=encoding)
@@ -128,7 +142,7 @@ class BERTDataset(Dataset):
             return t
         else:
             line = next(self.file)
-            (t,_) = line_to_data(line)
+            (t,_) = line_to_data(line, True)
         assert t is not None
         return t
 
@@ -410,14 +424,7 @@ def main():
         with open(fp, "rb") as f:
             tokenizer = pickle.load(f)
     else:
-        tokenizer = CharTokenizer()
-        # Train tokenizer
-        print("Training tokenizer using data from %s" % args.train_file)
-        with open(args.train_file, encoding="utf-8") as f:
-            for line in f:
-                (text, label) = line_to_data(line)
-                if text:
-                    tokenizer.update_vocab(text)
+        tokenizer = CharTokenizer(args.vocab_file)
         if args.min_freq > 1:
             tokenizer.trim_vocab(args.min_freq)
         # Adapt vocab size in config
@@ -450,7 +457,10 @@ def main():
     elif n_gpu > 1:
         model = torch.nn.DataParallel(model, device_ids=device_ids)
     print(model.config)
-        
+    print("Nb params: %d" % count_params(model))
+
+    sys.exit()
+    
     # Prepare optimizer
     param_optimizer = list(model.named_parameters())
     no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
