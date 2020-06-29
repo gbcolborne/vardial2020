@@ -40,14 +40,21 @@ logging.basicConfig(format='%(asctime)s - %(levelname)s - %(name)s -   %(message
 logger = logging.getLogger(__name__)
 
 
+def line_to_data(line):
+    """ Takes a line from a labeled dataset, and returns the text and label. """
+    elems = line.strip().split("\t")
+    assert len(elems == 2)
+    return (elems[0], elems[1])
+
+
 class BERTDataset(Dataset):
     
-    def __init__(self, corpus_path, tokenizer, seq_len, encoding="utf-8", corpus_lines=None, on_memory=True):
+    def __init__(self, corpus_path, tokenizer, seq_len, encoding="utf-8", nb_corpus_lines=None, on_memory=True):
         self.vocab = tokenizer.vocab
         self.tokenizer = tokenizer
         self.seq_len = seq_len
         self.on_memory = on_memory
-        self.corpus_lines = corpus_lines  # number of non-empty lines in input corpus
+        self.nb_corpus_lines = nb_corpus_lines  # number of non-empty lines in input corpus
         self.corpus_path = corpus_path
         self.encoding = encoding
         self.sample_counter = 0  # used to keep track of how many times we have sampled from the dataset (across all epochs)
@@ -56,27 +63,28 @@ class BERTDataset(Dataset):
         if on_memory:
             self.lines = []
             doc = []
-            self.corpus_lines = 0
+            self.nb_corpus_lines = 0
             with open(corpus_path, "r", encoding=encoding) as f:
-                for line in tqdm(f, desc="Loading Dataset", total=corpus_lines):
-                    line = line.strip()
-                    if line != "":
+                for line in tqdm(f, desc="Loading Dataset", total=nb_corpus_lines):
+                    (text, label) = line_to_data(line)
+                    if text is not None:
                         self.lines.append(line)
-            self.corpus_lines = len(self.lines)
+            self.nb_corpus_lines = len(self.lines)
 
         # load samples later lazily from disk
         else:
-            if self.corpus_lines is None:
+            if self.nb_corpus_lines is None:
                 with open(corpus_path, "r", encoding=encoding) as f:
-                    self.corpus_lines = 0
-                    for line in tqdm(f, desc="Loading Dataset", total=corpus_lines):
-                        if line.strip() != "":
-                            self.corpus_lines += 1
+                    self.nb_corpus_lines = 0
+                    for line in tqdm(f, desc="Loading Dataset", total=nb_corpus_lines):
+                        (text, label) = line_to_data(line)
+                        if text is not None:
+                            self.nb_corpus_lines += 1
             self.file = open(corpus_path, "r", encoding=encoding)
 
             
     def __len__(self):
-        return self.corpus_lines 
+        return self.nb_corpus_lines 
 
     
     def __getitem__(self, item):
@@ -112,14 +120,14 @@ class BERTDataset(Dataset):
         :return: str, a sentence from corpus
         """
         t = ""
-        assert item < self.corpus_lines
+        assert item < self.nb_corpus_lines
         if self.on_memory:
             t = self.lines[item]
             return t
         else:
-            t = next(self.file).strip()
-
-        assert t != ""
+            line = next(self.file)
+            (t,_) = line_to_data(line)
+        assert t is not None
         return t
 
 
@@ -410,7 +418,7 @@ def main():
     if args.do_train:
         print("Loading Train Dataset", args.train_file)
         train_dataset = BERTDataset(args.train_file, tokenizer, seq_len=args.max_seq_length,
-                                    corpus_lines=None, on_memory=args.on_memory)
+                                    nb_corpus_lines=None, on_memory=args.on_memory)
         num_train_optimization_steps = int(
             len(train_dataset) / args.train_batch_size / args.gradient_accumulation_steps) * args.num_train_epochs
         if args.local_rank != -1:
