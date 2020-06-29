@@ -34,6 +34,8 @@ from tqdm import tqdm, trange
 
 from CharTokenizer import CharTokenizer
 
+NO_MASK_LABEL = -100
+
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(name)s -   %(message)s',
                     datefmt='%m/%d/%Y %H:%M:%S',
                     level=logging.INFO)
@@ -188,8 +190,7 @@ def random_word(tokens, tokenizer):
                 output_label.append(tokenizer.vocab["[UNK]"])
                 logger.warning("Cannot find token '{}' in vocab. Using [UNK] instead".format(token))
         else:
-            # no masking token (will be ignored by loss function later)
-            output_label.append(-1)
+            output_label.append(NO_MASK_LABEL)
 
     return tokens, output_label
 
@@ -213,7 +214,7 @@ def convert_example_to_features(example, max_seq_length, tokenizer):
     tokens, t_label = random_word(tokens, tokenizer)
 
     # concatenate lm labels and account for CLS, SEP
-    lm_label_ids = ([-1] + t_label + [-1])
+    lm_label_ids = ([NO_MASK_LABEL] + t_label + [NO_MASK_LABEL])
 
     # The convention in BERT is:
     # (a) For sequence pairs:
@@ -254,7 +255,7 @@ def convert_example_to_features(example, max_seq_length, tokenizer):
         input_ids.append(0)
         input_mask.append(0)
         segment_ids.append(0)
-        lm_label_ids.append(-1)
+        lm_label_ids.append(NO_MASK_LABEL)
 
     assert len(input_ids) == max_seq_length
     assert len(input_mask) == max_seq_length
@@ -304,12 +305,6 @@ def main():
                         help="The output directory where the model checkpoints will be written.")
 
     ## Other parameters
-    parser.add_argument("--max_seq_length",
-                        default=128,
-                        type=int,
-                        help="The maximum total input sequence length after WordPiece tokenization. \n"
-                             "Sequences longer than this will be truncated, and sequences shorter \n"
-                             "than this will be padded.")
     parser.add_argument("--do_train",
                         action='store_true',
                         help="Whether to run training.")
@@ -352,9 +347,8 @@ def main():
                         type=int,
                         default=1,
                         help="Number of updates steps to accumualte before performing a backward/update pass.")
-
     args = parser.parse_args()
-
+    
     # Check whether bert_model_or_config_file is a file or directory
     if os.path.isdir(args.bert_model_or_config_file):
         pretrained=True
@@ -368,7 +362,7 @@ def main():
         config = BertConfig(fp)
     else:
         pretrained=False
-        config = BertConfig(args.bert_model_or_config_file)
+        config = BertConfig.from_json_file(args.bert_model_or_config_file)
 
     # What GPUs do we use?
     if args.num_gpus == -1:
@@ -429,12 +423,13 @@ def main():
         # Adapt vocab size in config
         config.vocab_size = len(tokenizer.vocab)
         print("Size of vocab: {}".format(len(tokenizer.vocab)))
-
+    
     # Get training data
     num_train_steps = None
+    max_seq_length = config.max_position_embeddings
     if args.do_train:        
         print("Preparing dataset using data from %s" % args.train_file)
-        train_dataset = BERTDataset(args.train_file, tokenizer, seq_len=args.max_seq_length,
+        train_dataset = BERTDataset(args.train_file, tokenizer, seq_len=max_seq_length,
                                     nb_corpus_lines=None, on_memory=args.on_memory)
         num_train_steps = int(len(train_dataset) / args.train_batch_size / args.gradient_accumulation_steps) * args.num_train_epochs
         if args.local_rank != -1:
@@ -454,7 +449,8 @@ def main():
         model = DDP(model)
     elif n_gpu > 1:
         model = torch.nn.DataParallel(model, device_ids=device_ids)
-
+    print(model.config)
+        
     # Prepare optimizer
     param_optimizer = list(model.named_parameters())
     no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
@@ -496,7 +492,13 @@ def main():
             for step, batch in enumerate(tqdm(train_dataloader, desc="Iteration")):
                 batch = tuple(t.to(device) for t in batch)
                 input_ids, input_mask, segment_ids, lm_label_ids = batch
-                outputs = model(input_ids, segment_ids, input_mask, lm_label_ids)
+                # Call model. Note: if position_ids is None, they
+                # assume input IDs are in order starting at position 0
+                outputs = model(input_ids=input_ids,
+                                attention_mask=input_mask,
+                                token_type_ids=segment_ids,
+                                lm_labels=lm_label_ids,
+                                position_ids=None)
                 loss = outputs[0]
                 if n_gpu > 1:
                     loss = loss.mean() # mean() to average on multi-gpu.

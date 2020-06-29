@@ -11,7 +11,6 @@ class CharTokenizer():
         self.char2count = {}
         return
 
-    
     def _init_vocab(self):
         vocab = {}
         vocab["[PAD]"] = len(vocab)
@@ -27,9 +26,10 @@ class CharTokenizer():
         """ Update vocab and character frequencies. """
         for char in text:
             if char not in self.vocab:
-                vocab[char] = len(vocab)
-                char2count[char] = 0
-            char2count[char] += 1
+                self.vocab[char] = len(self.vocab)
+            if char not in self.char2count:
+                self.char2count[char] = 0
+            self.char2count[char] += 1
         return
 
     
@@ -40,10 +40,13 @@ class CharTokenizer():
             msg = "Provide training data when initializing tokenizer if you want to then trim the vocab."
             raise NotImplementedError(msg)
         new_vocab = self._init_vocab()
-        for char in CUNEIFORM_CHARS:
-            if self.char2count[char] >= min_freq:
+        new_char2count = {}
+        for char in self.vocab.keys():
+            if char not in new_vocab and self.char2count[char] >= min_freq:
                 new_vocab[char] = len(new_vocab)
+                new_char2count[char] = self.char2count[char]
         self.vocab = new_vocab
+        self.char2count = new_char2count
         return
 
     
