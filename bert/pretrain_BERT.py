@@ -43,7 +43,7 @@ logger = logging.getLogger(__name__)
 def line_to_data(line):
     """ Takes a line from a labeled dataset, and returns the text and label. """
     elems = line.strip().split("\t")
-    assert len(elems == 2)
+    assert len(elems) == 2
     return (elems[0], elems[1])
 
 
@@ -138,7 +138,7 @@ class InputExample(object):
         """Constructs a InputExample.
         Args:
             guid: Unique id for the example.
-            tokens: string. The untokenized text of a sequence. 
+            tokens: list of strings. The tokens.
             labels: (Optional) string. The language model labels of the example.
         """
         self.guid = guid
@@ -268,8 +268,7 @@ def convert_example_to_features(example, max_seq_length, tokenizer):
                 [str(x) for x in tokens]))
         logger.info("input_ids: %s" % " ".join([str(x) for x in input_ids]))
         logger.info("input_mask: %s" % " ".join([str(x) for x in input_mask]))
-        logger.info(
-                "segment_ids: %s" % " ".join([str(x) for x in segment_ids]))
+        logger.info("segment_ids: %s" % " ".join([str(x) for x in segment_ids]))
         logger.info("LM label: %s " % (lm_label_ids))
 
     features = InputFeatures(input_ids=input_ids,
@@ -318,6 +317,10 @@ def main():
                         default=32,
                         type=int,
                         help="Total batch size for training.")
+    parser.add_argument("--min_freq",
+                        default=1,
+                        type=int,
+                        help="Minimum character frequency. Characters whose frequency is under this threshold will be mapped to <UNK>")
     parser.add_argument("--learning_rate",
                         default=3e-5,
                         type=float,
@@ -326,7 +329,7 @@ def main():
                         default=3.0,
                         type=float,
                         help="Total number of training epochs to perform.")
-    parser.add_argument("--warmup_steps"
+    parser.add_argument("--num_warmup_steps",
                         default=0,
                         type=int,
                         help="Number of training steps to perform linear learning rate warmup for. ")
@@ -412,28 +415,30 @@ def main():
         fp = os.path.join(args.bert_model_or_config_file, "tokenizer.pkl")
         with open(fp, "rb") as f:
             tokenizer = pickle.load(f)
-
-    # Get training data
-    num_train_optimization_steps = None
-    if args.do_train:
-        print("Loading Train Dataset", args.train_file)
-        train_dataset = BERTDataset(args.train_file, tokenizer, seq_len=args.max_seq_length,
-                                    nb_corpus_lines=None, on_memory=args.on_memory)
-        num_train_optimization_steps = int(
-            len(train_dataset) / args.train_batch_size / args.gradient_accumulation_steps) * args.num_train_epochs
-        if args.local_rank != -1:
-            num_train_optimization_steps = num_train_optimization_steps // torch.distributed.get_world_size()
-
-        training_data = [line.strip() for line in open(args.train_file).readlines()]
+    else:
         tokenizer = CharTokenizer()
         # Train tokenizer
-        for i range(len(train_dataset)):
-            tokenizer.update_vocab(train_dataset.get_line(i))
-        tokenizer.trim_vocab(config.min_freq)
+        print("Training tokenizer using data from %s" % args.train_file)
+        with open(args.train_file, encoding="utf-8") as f:
+            for line in f:
+                (text, label) = line_to_data(line)
+                if text:
+                    tokenizer.update_vocab(text)
+        if args.min_freq > 1:
+            tokenizer.trim_vocab(args.min_freq)
         # Adapt vocab size in config
         config.vocab_size = len(tokenizer.vocab)
         print("Size of vocab: {}".format(len(tokenizer.vocab)))
 
+    # Get training data
+    num_train_steps = None
+    if args.do_train:        
+        print("Preparing dataset using data from %s" % args.train_file)
+        train_dataset = BERTDataset(args.train_file, tokenizer, seq_len=args.max_seq_length,
+                                    nb_corpus_lines=None, on_memory=args.on_memory)
+        num_train_steps = int(len(train_dataset) / args.train_batch_size / args.gradient_accumulation_steps) * args.num_train_epochs
+        if args.local_rank != -1:
+            num_train_steps = num_train_steps // torch.distributed.get_world_size()
             
     # Prepare model
     if pretrained:
@@ -460,7 +465,7 @@ def main():
     optimizer = AdamW(optimizer_grouped_parameters,
                       lr=args.learning_rate,
                       correct_bias=True) # To reproduce BertAdam specific behaviour, use correct_bias=False
-    scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=args.num_warmup_steps, num_training_steps=num_train_optimization_steps)
+    scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=args.num_warmup_steps, num_training_steps=num_train_steps)
 
     # Prepare training log
     output_log_file = os.path.join(args.output_dir, "training_log.txt")
@@ -474,7 +479,7 @@ def main():
         logger.info("***** Running training *****")
         logger.info("  Num examples = %d", len(train_dataset))
         logger.info("  Batch size = %d", args.train_batch_size)
-        logger.info("  Num steps = %d", num_train_optimization_steps)
+        logger.info("  Num steps = %d", num_train_steps)
 
         if args.local_rank == -1:
             train_sampler = RandomSampler(train_dataset)

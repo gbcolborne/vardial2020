@@ -10,5 +10,4 @@
 "max_position_embeddings":512,
 "type_vocab_size":2,
 "initializer_range":0.02,
-"min_freq":0
 }
