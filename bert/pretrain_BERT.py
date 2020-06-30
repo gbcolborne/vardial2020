@@ -21,7 +21,7 @@ Code based on: https://github.com/huggingface/pytorch-pretrained-BERT/blob/maste
 
 """
 
-import os, random, argparse, logging, pickle, glob, math
+import sys, os, random, argparse, logging, pickle, glob, math
 from io import open
 import numpy as np
 import torch
@@ -31,9 +31,17 @@ from transformers import BertForMaskedLM, BertConfig, WEIGHTS_NAME, CONFIG_NAME
 from transformers import AdamW
 from transformers.optimization import get_linear_schedule_with_warmup
 from tqdm import tqdm, trange
-
+from iteround import saferound
 from CharTokenizer import CharTokenizer
+sys.path.append("..")
+from comp_utils import RELEVANT_LANGS, IRRELEVANT_URALIC_LANGS, ALL_LANGS
 
+# Sample sizes of 3 language groups
+REL_SAMPLE_SIZE = 20000
+CON_SAMPLE_SIZE = 20000
+IRR_SAMPLE_SIZE = 20000
+
+# Label used in BertForLM to indicate a token is not masked.
 NO_MASK_LABEL = -100
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(name)s -   %(message)s',
@@ -42,6 +50,26 @@ logging.basicConfig(format='%(asctime)s - %(levelname)s - %(name)s -   %(message
 logger = logging.getLogger(__name__)
 
 
+def get_lang_group(lang):
+    assert lang in ALL_LANGS
+    if lang in RELEVANT_LANGS:
+        return "rel"
+    elif lang in IRRELEVANT_URALIC_LANGS:
+        return "con"
+    else:
+        return "irr"
+
+
+def get_nb_langs(group):
+    assert group in ["rel", "con", "irr"]
+    if group == "rel":
+        return len(RELEVANT_LANGS)
+    elif group == "con":
+        return (len(IRRELEVANT_URALIC_LANGS))
+    else:
+        return len(ALL_LANGS) - len(RELEVANT_LANGS) - len(IRRELEVANT_URALIC_LANGS)
+
+    
 def count_params(model):
     count = 0
     for p in model.parameters():
@@ -65,86 +93,134 @@ def line_to_data(line, is_labeled):
 
 class BERTDataset(Dataset):
     
-    def __init__(self, corpus_path, tokenizer, seq_len, encoding="utf-8", nb_corpus_lines=None, on_memory=True):
-        self.vocab = tokenizer.vocab
+    def __init__(self, train_paths, tokenizer, seq_len, sampling_distro="uniform", encoding="utf-8"):
+        assert sampling_distro in ["uniform", "relfreq", "custom"]
+        self.train_paths = train_paths # Paths of training files (names must match <lang>.train)
         self.tokenizer = tokenizer
+        self.vocab = tokenizer.vocab
         self.seq_len = seq_len
-        self.on_memory = on_memory
-        self.nb_corpus_lines = nb_corpus_lines  # number of non-empty lines in input corpus
-        self.corpus_path = corpus_path
-        self.encoding = encoding
-        self.sample_counter = 0  # used to keep track of how many times we have sampled from the dataset (across all epochs)
-
-        # load samples into memory
-        if on_memory:
-            self.lines = []
-            doc = []
-            self.nb_corpus_lines = 0
-            with open(corpus_path, "r", encoding=encoding) as f:
-                for line in tqdm(f, desc="Loading Dataset", total=nb_corpus_lines):
-                    (text, label) = line_to_data(line, True)
+        self.sampling_distro = sampling_distro
+        self.encoding = encoding        
+        self.sample_counter = 0  # total number of examples sampled by calling __getitem__ (across all epochs)
+        self.total_dataset_size = 0
+        self.sampled_dataset_size = REL_SAMPLE_SIZE + CON_SAMPLE_SIZE + IRR_SAMPLE_SIZE
+        self.lang2path = {}
+        self.lang2file = {}
+        self.lang2freq = {}
+        self.group2freq = {"rel":0, "con":0, "irr":0}
+        self.lang2ix = {}
+        self.lang2samplesize = {}
+        self.sampled_dataset = None
+        
+        # Prepare training files to sample lazily from disk
+        for path in sorted(train_paths):
+            fn = os.path.split(path)[-1]
+            assert fn[-6:] == ".train"
+            cut = fn.rfind(".")
+            lang = fn[:cut]
+            assert lang in ALL_LANGS
+            self.lang2path[lang] = path
+            # Open file to load lazily from disk later when we start sampling
+            self.lang2file[lang] = open(path, 'r', encoding=encoding)
+            self.lang2freq[lang] = 0
+            self.lang2ix[lang] = 0
+            # Count examples
+            with open(path, 'r', encoding=encoding) as f:
+                print("Processing %s" % path)
+                for line in f:
+                    (text, label) = line_to_data(line, False)
                     if text is not None:
-                        self.lines.append(line)
-            self.nb_corpus_lines = len(self.lines)
+                        self.lang2freq[lang] += 1
+                        self.total_dataset_size += 1
+            # Check which of the 3 groups this lang belongs to
+            group = get_lang_group(lang)
+            self.group2freq[group] += self.lang2freq[lang]
+        print("Total dataset size: %d" % self.total_dataset_size)
+        print("Sampled dataset size: %d" % self.sampled_dataset_size)
 
-        # load samples later lazily from disk
-        else:
-            if self.nb_corpus_lines is None:
-                with open(corpus_path, "r", encoding=encoding) as f:
-                    self.nb_corpus_lines = 0
-                    for line in tqdm(f, desc="Loading Dataset", total=nb_corpus_lines):
-                        (text, label) = line_to_data(line, True)
-                        if text is not None:
-                            self.nb_corpus_lines += 1
-            self.file = open(corpus_path, "r", encoding=encoding)
+        # Compute expected number of examples sampled from each language
+        self.lang2samplesize = self.compute_expected_sample_sizes()
+        print("Sum of expected sample sizes per language: %d" % (sum(self.lang2samplesize.values())))
 
-            
+        # Sample a training set
+        self.resample()
+        return
+    
+        
+    def compute_expected_sample_sizes(self):
+        # Map langs in the 3 groups to IDs
+        rel_langs = sorted(RELEVANT_LANGS)
+        con_langs = sorted(IRRELEVANT_URALIC_LANGS)
+        irr_langs = sorted(ALL_LANGS.difference(RELEVANT_LANGS).difference(IRRELEVANT_URALIC_LANGS))
+        rel_lang2id = dict((l,i) for (i,l) in enumerate(rel_langs))
+        con_lang2id = dict((l,i) for (i,l) in enumerate(con_langs))
+        irr_lang2id = dict((l,i) for (i,l) in enumerate(irr_langs))
+        if self.sampling_distro == "uniform":
+            rel_probs = np.ones(len(rel_langs), dtype=float) / len(rel_langs)
+            con_probs = np.ones(len(con_langs), dtype=float) / len(con_langs)
+            irr_probs = np.ones(len(irr_langs), dtype=float) / len(irr_langs)
+        if self.sampling_distro == "relfreq":
+            rel_counts = np.array([self.lang2freq[k] for k in rel_langs], dtype=np.float)
+            rel_probs = rel_counts / rel_counts.sum()
+            con_counts = np.array([self.lang2freq[k] for k in con_langs], dtype=np.float)
+            con_probs = con_counts / con_counts.sum()
+            irr_counts = np.array([self.lang2freq[k] for k in irr_langs], dtype=np.float)
+            irr_probs = irr_counts / irr_counts.sum()
+        if self.sampling_distro == "custom":
+            raise NotImplementedError
+        rel_dev_counts = [int(x) for x in saferound(rel_probs * REL_SAMPLE_SIZE, 0, "largest")]
+        con_dev_counts = [int(x) for x in saferound(con_probs * CON_SAMPLE_SIZE, 0, "largest")]
+        irr_dev_counts = [int(x) for x in saferound(irr_probs * IRR_SAMPLE_SIZE, 0, "largest")]
+        lang2samplesize = {}
+        for i,x in enumerate(rel_dev_counts):
+            lang2samplesize[rel_langs[i]] = x
+        for i,x in enumerate(con_dev_counts):
+            lang2samplesize[con_langs[i]] = x
+        for i,x in enumerate(irr_dev_counts):
+            lang2samplesize[irr_langs[i]] = x
+        return lang2samplesize
+
+    
+    def resample(self):
+        """ Sample dataset by lazily loading part of the data from disk. """
+        data = []
+        for lang in self.lang2path.keys():
+            # Check how many examples we sample for this lang
+            sample_size = self.lang2samplesize[lang]
+            for _ in range(sample_size):
+                # Check if we have reached EOF
+                if self.lang2ix[lang] >= (self.lang2freq[lang]-1):
+                    self.lang2file[lang].close()
+                    self.lang2file[lang] = open(self.lang2path[lang], "r", encoding=self.encoding)
+                    self.lang2ix[lang] = 0
+                line = next(self.lang2file[lang])
+                self.lang2ix[lang] += 1
+                (text,_) = line_to_data(line, False)
+                assert text is not None and len(text)
+                data.append(text)
+        assert len(data) == self.sampled_dataset_size
+        # Shuffle
+        np.random.shuffle(data)
+        self.sampled_dataset = data
+        return None
+
+    
     def __len__(self):
-        return self.nb_corpus_lines 
+        return self.sampled_dataset_size
 
     
     def __getitem__(self, item):
-        cur_id = self.sample_counter
+        t = self.sampled_dataset[item]
+        example_id = self.sample_counter
         self.sample_counter += 1
-        if not self.on_memory:
-            # after one epoch we start again from beginning of file
-            if cur_id != 0 and (cur_id % len(self) == 0):
-                self.file.close()
-                self.file = open(self.corpus_path, "r", encoding=self.encoding)
-
-        t = self.get_line(item)
-
-        # tokenize
         tokens = self.tokenizer.tokenize(t)
-
-        # combine to one sample
-        cur_example = InputExample(guid=cur_id, tokens=tokens)
-
-        # transform sample to features
-        cur_features = convert_example_to_features(cur_example, self.seq_len, self.tokenizer)
-        cur_tensors = (torch.tensor(cur_features.input_ids),
-                       torch.tensor(cur_features.input_mask),
-                       torch.tensor(cur_features.segment_ids),
-                       torch.tensor(cur_features.lm_label_ids))
-        return cur_tensors
-
-    
-    def get_line(self, item):
-        """
-        Get one sample from corpus consisting of a single line.
-        :param item: int, index of sample.
-        :return: str, a sentence from corpus
-        """
-        t = ""
-        assert item < self.nb_corpus_lines
-        if self.on_memory:
-            t = self.lines[item]
-            return t
-        else:
-            line = next(self.file)
-            (t,_) = line_to_data(line, True)
-        assert t is not None
-        return t
+        example = InputExample(guid=example_id, tokens=tokens)
+        features = convert_example_to_features(example, self.seq_len, self.tokenizer)
+        tensors = (torch.tensor(features.input_ids),
+                   torch.tensor(features.input_mask),
+                   torch.tensor(features.segment_ids),
+                   torch.tensor(features.lm_label_ids))
+        return tensors
 
 
 class InputExample(object):
@@ -460,9 +536,13 @@ def main():
     num_train_steps = None
     max_seq_length = args.seq_len + 2 # We add 2 for CLS and SEP
     if args.do_train:        
-        print("Preparing dataset using data from %s" % train_paths)
-        train_dataset = BERTDataset(train_paths, tokenizer, seq_len=max_seq_length,
-                                    nb_corpus_lines=None, on_memory=args.on_memory)                            
+        print("Preparing dataset using data from %s" % args.dir_train_data)
+        train_dataset = BERTDataset(train_paths,
+                                    tokenizer,
+                                    seq_len=max_seq_length,
+                                    sampling_distro="uniform",
+                                    encoding="utf-8")
+
         num_steps_per_epoch = int(len(train_dataset) / args.train_batch_size / args.gradient_accumulation_steps) 
         if args.local_rank != -1:
             num_steps_per_epoch = num_steps_per_epoch // torch.distributed.get_world_size()
