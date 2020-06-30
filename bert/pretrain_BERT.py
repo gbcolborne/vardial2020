@@ -126,7 +126,7 @@ class BERTDataset(Dataset):
             self.lang2ix[lang] = 0
             # Count examples
             with open(path, 'r', encoding=encoding) as f:
-                print("Processing %s" % path)
+                logger.info("Processing %s" % path)
                 for line in f:
                     (text, label) = line_to_data(line, False)
                     if text is not None:
@@ -135,12 +135,12 @@ class BERTDataset(Dataset):
             # Check which of the 3 groups this lang belongs to
             group = get_lang_group(lang)
             self.group2freq[group] += self.lang2freq[lang]
-        print("Total dataset size: %d" % self.total_dataset_size)
-        print("Sampled dataset size: %d" % self.sampled_dataset_size)
+        logger.info("Total dataset size: %d" % self.total_dataset_size)
+        logger.info("Sampled dataset size: %d" % self.sampled_dataset_size)
 
         # Compute expected number of examples sampled from each language
         self.lang2samplesize = self.compute_expected_sample_sizes()
-        print("Sum of expected sample sizes per language: %d" % (sum(self.lang2samplesize.values())))
+        logger.info("Sum of expected sample sizes per language: %d" % (sum(self.lang2samplesize.values())))
 
         # Sample a training set
         self.resample()
@@ -510,7 +510,7 @@ def main():
             tokenizer.trim_vocab(args.min_freq)
         # Adapt vocab size in config
         config.vocab_size = len(tokenizer.vocab)
-        print("Size of vocab: {}".format(len(tokenizer.vocab)))
+        logger.info("Size of vocab: {}".format(len(tokenizer.vocab)))
     
             
     # Prepare model
@@ -527,13 +527,13 @@ def main():
         model = DDP(model)
     elif n_gpu > 1:
         model = torch.nn.DataParallel(model, device_ids=device_ids)
-    print(model.config)
-    print("Nb params: %d" % count_params(model))
+    logger.info("Model config: %s" % repr(model.config))
+    logger.info("Nb params: %d" % count_params(model))
 
 
     # Get training data
     max_seq_length = args.seq_len + 2 # We add 2 for CLS and SEP
-    print("Preparing dataset using data from %s" % args.dir_train_data)
+    logger.info("Preparing dataset using data from %s" % args.dir_train_data)
     train_dataset = BERTDataset(train_paths, tokenizer, seq_len=max_seq_length, sampling_distro=args.sampling_distro, encoding="utf-8")
     if args.local_rank == -1:
         train_sampler = RandomSampler(train_dataset)
@@ -545,11 +545,11 @@ def main():
     if args.local_rank != -1:
         num_steps_per_epoch = num_steps_per_epoch // torch.distributed.get_world_size()
     num_epochs = math.ceil(args.num_train_steps / num_steps_per_epoch)
-    print("  Dataset size: %d" % len(train_dataset))
-    print("  # steps/epoch (with batch size = %d, # accumulation steps = %d): %d" % (args.train_batch_size,
+    logger.info("Dataset size: %d" % len(train_dataset))
+    logger.info("# steps/epoch (with batch size = %d, # accumulation steps = %d): %d" % (args.train_batch_size,
                                                                                      args.gradient_accumulation_steps,
                                                                                      num_steps_per_epoch))
-    print("  # epochs (for %d steps): %d" % (args.num_train_steps, num_epochs))
+    logger.info("# epochs (for %d steps): %d" % (args.num_train_steps, num_epochs))
         
     # Prepare training log
     output_log_file = os.path.join(args.output_dir, "training_log.txt")
