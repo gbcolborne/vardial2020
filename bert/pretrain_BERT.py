@@ -398,6 +398,10 @@ def main():
     parser.add_argument("--do_train",
                         action='store_true',
                         help="Whether to run training.")
+    parser.add_argument("--sampling_distro",
+                        choices=["uniform", "relfreq", "custom"],
+                        default="relfreq",
+                        help="Distribution used for sampling training data within each group (relevant, confound, and irrelevant")
     parser.add_argument("--train_batch_size",
                         default=32,
                         type=int,
@@ -539,7 +543,7 @@ def main():
         train_dataset = BERTDataset(train_paths,
                                     tokenizer,
                                     seq_len=max_seq_length,
-                                    sampling_distro="uniform",
+                                    sampling_distro=args.sampling_distro,
                                     encoding="utf-8")
 
         num_steps_per_epoch = int(len(train_dataset) / args.train_batch_size / args.gradient_accumulation_steps) 
