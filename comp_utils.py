@@ -120,7 +120,8 @@ def string_to_data(string, frmt, lang=None):
             text_id = int(elems[2])
             url = None
         return (text, text_id, url, lang)
-        
+
+    
 def map_ULI_langs_to_paths(dir_training_data):
     """ For ULI task, map languages to path of file containing the corresponding training data. 
 
@@ -150,6 +151,7 @@ def extract_text_id_and_url(line, lang):
     """Extract text from a line extracted from one of the training files. """
     text, text_id, url, lang = string_to_data(line, "source", lang=lang)
     return (text, text_id, url)
+
 
 def stream_sents(lang, dir_training_data):
     """Stream sentences (along with their URL) from training data. Skip empty lines."""
