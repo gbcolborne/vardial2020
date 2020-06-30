@@ -94,7 +94,7 @@ def line_to_data(line, is_labeled):
 class BERTDataset(Dataset):
     
     def __init__(self, train_paths, tokenizer, seq_len, sampling_distro="uniform", encoding="utf-8"):
-        assert sampling_distro in ["uniform", "relfreq", "custom"]
+        assert sampling_distro in ["uniform", "relfreq", "dampfreq"]
         self.train_paths = train_paths # Paths of training files (names must match <lang>.train)
         self.tokenizer = tokenizer
         self.vocab = tokenizer.vocab
@@ -159,24 +159,38 @@ class BERTDataset(Dataset):
             rel_probs = np.ones(len(rel_langs), dtype=float) / len(rel_langs)
             con_probs = np.ones(len(con_langs), dtype=float) / len(con_langs)
             irr_probs = np.ones(len(irr_langs), dtype=float) / len(irr_langs)
-        if self.sampling_distro == "relfreq":
+        elif self.sampling_distro in ["relfreq", "dampfreq"]:
             rel_counts = np.array([self.lang2freq[k] for k in rel_langs], dtype=np.float)
-            rel_probs = rel_counts / rel_counts.sum()
             con_counts = np.array([self.lang2freq[k] for k in con_langs], dtype=np.float)
-            con_probs = con_counts / con_counts.sum()
             irr_counts = np.array([self.lang2freq[k] for k in irr_langs], dtype=np.float)
-            irr_probs = irr_counts / irr_counts.sum()
-        if self.sampling_distro == "custom":
-            raise NotImplementedError
-        rel_dev_counts = [int(x) for x in saferound(rel_probs * REL_SAMPLE_SIZE, 0, "largest")]
-        con_dev_counts = [int(x) for x in saferound(con_probs * CON_SAMPLE_SIZE, 0, "largest")]
-        irr_dev_counts = [int(x) for x in saferound(irr_probs * IRR_SAMPLE_SIZE, 0, "largest")]
+            rel_probs = rel_counts / rel_counts.sum()
+            con_probs = con_counts / con_counts.sum()
+            irr_probs = irr_counts / irr_counts.sum()                            
+            if self.sampling_distro == "dampfreq":
+                rel_probs_damp = rel_probs ** 0.5
+                rel_probs = rel_probs_damp / rel_probs_damp.sum()
+                con_probs_damp = con_probs ** 0.5
+                con_probs = con_probs_damp / con_probs_damp.sum()                
+                irr_probs_damp = irr_probs ** 0.5
+                irr_probs = irr_probs_damp / irr_probs_damp.sum()                
+        rel_sample_sizes = [int(x) for x in saferound(rel_probs * REL_SAMPLE_SIZE, 0, "largest")]
+        con_sample_sizes = [int(x) for x in saferound(con_probs * CON_SAMPLE_SIZE, 0, "largest")]
+        irr_sample_sizes = [int(x) for x in saferound(irr_probs * IRR_SAMPLE_SIZE, 0, "largest")]
+        logger.info("  # samples (relevant): %d" % sum(rel_sample_sizes))
+        logger.info("    Min samples/lang (relevant): %d" % min(rel_sample_sizes))
+        logger.info("    Max samples/lang (relevant): %d" % max(rel_sample_sizes))
+        logger.info("  # samples (confounders): %d" % sum(con_sample_sizes))        
+        logger.info("    Min samples/lang (confounders): %d" % min(con_sample_sizes))
+        logger.info("    Max samples/lang (confounders): %d" % max(con_sample_sizes))
+        logger.info("  # samples (irrelevant): %d" % sum(irr_sample_sizes))                
+        logger.info("    Min samples/lang (irrelevant): %d" % min(irr_sample_sizes))
+        logger.info("    Max samples/lang (irrelevant): %d" % max(irr_sample_sizes))
         lang2samplesize = {}
-        for i,x in enumerate(rel_dev_counts):
+        for i,x in enumerate(rel_sample_sizes):
             lang2samplesize[rel_langs[i]] = x
-        for i,x in enumerate(con_dev_counts):
+        for i,x in enumerate(con_sample_sizes):
             lang2samplesize[con_langs[i]] = x
-        for i,x in enumerate(irr_dev_counts):
+        for i,x in enumerate(irr_sample_sizes):
             lang2samplesize[irr_langs[i]] = x
         return lang2samplesize
 
@@ -396,9 +410,9 @@ def main():
 
     ## Other parameters
     parser.add_argument("--sampling_distro",
-                        choices=["uniform", "relfreq", "custom"],
+                        choices=["uniform", "relfreq", "dampfreq"],
                         default="relfreq",
-                        help="Distribution used for sampling training data within each group (relevant, confound, and irrelevant")
+                        help="Distribution used for sampling training data within each group (relevant, confound, and irrelevant)")
     parser.add_argument("--train_batch_size",
                         default=32,
                         type=int,
