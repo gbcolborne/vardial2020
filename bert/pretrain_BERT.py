@@ -395,9 +395,6 @@ def main():
                         help="The output directory where the model checkpoints will be written.")
 
     ## Other parameters
-    parser.add_argument("--do_train",
-                        action='store_true',
-                        help="Whether to run training.")
     parser.add_argument("--sampling_distro",
                         choices=["uniform", "relfreq", "custom"],
                         default="relfreq",
@@ -486,8 +483,6 @@ def main():
         raise ValueError("Invalid gradient_accumulation_steps parameter: {}, should be >= 1".format(
                             args.gradient_accumulation_steps))
     args.train_batch_size = args.train_batch_size // args.gradient_accumulation_steps
-    if not args.do_train:
-        raise ValueError("Training is currently the only implemented execution option. Please set `do_train`.")
     train_paths = glob.glob(os.path.join(args.dir_train_data, "*.train"))
     assert len(train_paths) > 0
     if os.path.exists(args.output_dir) and os.listdir(args.output_dir):
@@ -538,23 +533,22 @@ def main():
 
     # Get training data
     max_seq_length = args.seq_len + 2 # We add 2 for CLS and SEP
-    if args.do_train:        
-        print("Preparing dataset using data from %s" % args.dir_train_data)
-        train_dataset = BERTDataset(train_paths,
-                                    tokenizer,
-                                    seq_len=max_seq_length,
-                                    sampling_distro=args.sampling_distro,
-                                    encoding="utf-8")
+    print("Preparing dataset using data from %s" % args.dir_train_data)
+    train_dataset = BERTDataset(train_paths,
+                                tokenizer,
+                                seq_len=max_seq_length,
+                                sampling_distro=args.sampling_distro,
+                                encoding="utf-8")
 
-        num_steps_per_epoch = int(len(train_dataset) / args.train_batch_size / args.gradient_accumulation_steps) 
-        if args.local_rank != -1:
-            num_steps_per_epoch = num_steps_per_epoch // torch.distributed.get_world_size()
-        num_epochs = math.ceil(args.num_train_steps / num_steps_per_epoch)
-        print("  Dataset size: %d" % len(train_dataset))
-        print("  # steps/epoch (with batch size = %d, # accumulation steps = %d): %d" % (args.train_batch_size,
-                                                                                         args.gradient_accumulation_steps,
-                                                                                         num_steps_per_epoch))
-        print("  # epochs (for %d steps): %d" % (args.num_train_steps, num_epochs))
+    num_steps_per_epoch = int(len(train_dataset) / args.train_batch_size / args.gradient_accumulation_steps) 
+    if args.local_rank != -1:
+        num_steps_per_epoch = num_steps_per_epoch // torch.distributed.get_world_size()
+    num_epochs = math.ceil(args.num_train_steps / num_steps_per_epoch)
+    print("  Dataset size: %d" % len(train_dataset))
+    print("  # steps/epoch (with batch size = %d, # accumulation steps = %d): %d" % (args.train_batch_size,
+                                                                                     args.gradient_accumulation_steps,
+                                                                                     num_steps_per_epoch))
+    print("  # epochs (for %d steps): %d" % (args.num_train_steps, num_epochs))
         
     # Prepare training log
     output_log_file = os.path.join(args.output_dir, "training_log.txt")
@@ -577,65 +571,64 @@ def main():
     # Start training
     global_step = 0
     total_tr_steps = 0
-    if args.do_train:
-        logger.info("***** Running training *****")
-        logger.info("  Num examples = %d", len(train_dataset))
-        logger.info("  Batch size = %d", args.train_batch_size)
-        logger.info("  Num steps = %d", args.num_train_steps)
+    logger.info("***** Running training *****")
+    logger.info("  Num examples = %d", len(train_dataset))
+    logger.info("  Batch size = %d", args.train_batch_size)
+    logger.info("  Num steps = %d", args.num_train_steps)
 
-        if args.local_rank == -1:
-            train_sampler = RandomSampler(train_dataset)
-        else:
-            #TODO: check if this works with current data generator from disk that relies on next(file)
-            # (it doesn't return item back by index)
-            train_sampler = DistributedSampler(train_dataset)
-        train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.train_batch_size)
+    if args.local_rank == -1:
+        train_sampler = RandomSampler(train_dataset)
+    else:
+        #TODO: check if this works with current data generator from disk that relies on next(file)
+        # (it doesn't return item back by index)
+        train_sampler = DistributedSampler(train_dataset)
+    train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.train_batch_size)
 
-        model.train()
-        for _ in trange(int(num_epochs), desc="Epoch"):
-            tr_loss = 0
-            nb_tr_examples, nb_tr_steps = 0, 0
-            for step, batch in enumerate(tqdm(train_dataloader, desc="Iteration")):
-                batch = tuple(t.to(device) for t in batch)
-                input_ids, input_mask, segment_ids, lm_label_ids = batch
-                # Call model. Note: if position_ids is None, they
-                # assume input IDs are in order starting at position 0
-                outputs = model(input_ids=input_ids,
-                                attention_mask=input_mask,
-                                token_type_ids=segment_ids,
-                                lm_labels=lm_label_ids,
-                                position_ids=None)
-                loss = outputs[0]
-                if n_gpu > 1:
-                    loss = loss.mean() # mean() to average on multi-gpu.
-                if args.gradient_accumulation_steps > 1:
-                    loss = loss / args.gradient_accumulation_steps
-                loss.backward()
-                tr_loss += loss.item()
-                nb_tr_examples += input_ids.size(0)
-                nb_tr_steps += 1
-                if (step + 1) % args.gradient_accumulation_steps == 0:
-                    optimizer.step()
-                    optimizer.zero_grad()
-                    scheduler.step()
-                    global_step += 1
-                    if global_step >= args.num_train_steps:
-                        break
-            avg_loss = tr_loss / nb_tr_examples
+    model.train()
+    for _ in trange(int(num_epochs), desc="Epoch"):
+        tr_loss = 0
+        nb_tr_examples, nb_tr_steps = 0, 0
+        for step, batch in enumerate(tqdm(train_dataloader, desc="Iteration")):
+            batch = tuple(t.to(device) for t in batch)
+            input_ids, input_mask, segment_ids, lm_label_ids = batch
+            # Call model. Note: if position_ids is None, they
+            # assume input IDs are in order starting at position 0
+            outputs = model(input_ids=input_ids,
+                            attention_mask=input_mask,
+                            token_type_ids=segment_ids,
+                            lm_labels=lm_label_ids,
+                            position_ids=None)
+            loss = outputs[0]
+            if n_gpu > 1:
+                loss = loss.mean() # mean() to average on multi-gpu.
+            if args.gradient_accumulation_steps > 1:
+                loss = loss / args.gradient_accumulation_steps
+            loss.backward()
+            tr_loss += loss.item()
+            nb_tr_examples += input_ids.size(0)
+            nb_tr_steps += 1
+            if (step + 1) % args.gradient_accumulation_steps == 0:
+                optimizer.step()
+                optimizer.zero_grad()
+                scheduler.step()
+                global_step += 1
+                if global_step >= args.num_train_steps:
+                    break
+        avg_loss = tr_loss / nb_tr_examples
 
-            # Update training log
-            total_tr_steps += nb_tr_steps
-            log_data = [str(total_tr_steps), "{:.5f}".format(avg_loss)]
-            with open(output_log_file, "a") as f:
-                f.write("\t".join(log_data)+"\n")
+        # Update training log
+        total_tr_steps += nb_tr_steps
+        log_data = [str(total_tr_steps), "{:.5f}".format(avg_loss)]
+        with open(output_log_file, "a") as f:
+            f.write("\t".join(log_data)+"\n")
 
-            # Save model
-            logger.info("** ** * Saving model ** ** * ")
-            model_to_save = model.module if hasattr(model, 'module') else model  # Only save the model it-self
-            model_to_save.save_pretrained(args.output_dir)
-            fn = os.path.join(args.output_dir, "tokenizer.pkl")
-            with open(fn, "wb") as f:
-                pickle.dump(tokenizer, f)
+        # Save model
+        logger.info("** ** * Saving model ** ** * ")
+        model_to_save = model.module if hasattr(model, 'module') else model  # Only save the model it-self
+        model_to_save.save_pretrained(args.output_dir)
+        fn = os.path.join(args.output_dir, "tokenizer.pkl")
+        with open(fn, "wb") as f:
+            pickle.dump(tokenizer, f)
 
 
 if __name__ == "__main__":
