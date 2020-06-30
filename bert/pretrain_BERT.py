@@ -21,7 +21,7 @@ Code based on: https://github.com/huggingface/pytorch-pretrained-BERT/blob/maste
 
 """
 
-import os, random, argparse, logging, pickle
+import os, random, argparse, logging, pickle, glob
 from io import open
 import numpy as np
 import torch
@@ -311,7 +311,7 @@ def main():
                         default=None,
                         type=str,
                         required=True,
-                        help="Path of a directory containing training data and vocab")
+                        help="Path of a directory containing training files (names must match <lang>.train) and vocab.txt")
     parser.add_argument("--output_dir",
                         default=None,
                         type=str,
@@ -408,8 +408,8 @@ def main():
     args.train_batch_size = args.train_batch_size // args.gradient_accumulation_steps
     if not args.do_train:
         raise ValueError("Training is currently the only implemented execution option. Please set `do_train`.")
-    path_train_data = os.path.join(args.dir_train_data, "train.tsv")
-    assert os.path.exists(path_train_data)
+    train_paths = glob.glob(os.path.join(args.dir_train_data, "*.train")
+    assert len(train_paths) > 0
     if os.path.exists(args.output_dir) and os.listdir(args.output_dir):
         raise ValueError("Output directory ({}) already exists and is not empty.".format(args.output_dir))
     if not os.path.exists(args.output_dir):
@@ -460,8 +460,8 @@ def main():
     num_train_steps = None
     max_seq_length = args.seq_len + 2 # We add 2 for CLS and SEP
     if args.do_train:        
-        print("Preparing dataset using data from %s" % path_train_data)
-        train_dataset = BERTDataset(path_train_data, tokenizer, seq_len=max_seq_length,
+        print("Preparing dataset using data from %s" % train_paths)
+        train_dataset = BERTDataset(train_paths, tokenizer, seq_len=max_seq_length,
                                     nb_corpus_lines=None, on_memory=args.on_memory)
         num_train_steps = int(len(train_dataset) / args.train_batch_size / args.gradient_accumulation_steps) * args.num_train_epochs
         if args.local_rank != -1:
