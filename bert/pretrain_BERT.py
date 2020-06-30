@@ -326,6 +326,10 @@ def main():
                         default=32,
                         type=int,
                         help="Total batch size for training.")
+    parser.add_argument("--seq_len",
+                        default=128,
+                        type=int,
+                        help="Length of input sequences. Shorter seqs are padded, longer ones are trucated")
     parser.add_argument("--min_freq",
                         default=1,
                         type=int,
@@ -451,7 +455,22 @@ def main():
     print(model.config)
     print("Nb params: %d" % count_params(model))
 
-    sys.exit()
+
+    # Get training data
+    num_train_steps = None
+    max_seq_length = args.seq_len + 2 # We add 2 for CLS and SEP
+    if args.do_train:        
+        print("Preparing dataset using data from %s" % path_train_data)
+        train_dataset = BERTDataset(path_train_data, tokenizer, seq_len=max_seq_length,
+                                    nb_corpus_lines=None, on_memory=args.on_memory)
+        num_train_steps = int(len(train_dataset) / args.train_batch_size / args.gradient_accumulation_steps) * args.num_train_epochs
+        if args.local_rank != -1:
+            num_train_steps = num_train_steps // torch.distributed.get_world_size()
+
+    # Prepare training log
+    output_log_file = os.path.join(args.output_dir, "training_log.txt")
+    with open(output_log_file, "w") as f:
+        f.write("Steps\tTrainLoss\n")
     
     # Prepare optimizer
     param_optimizer = list(model.named_parameters())
@@ -464,24 +483,7 @@ def main():
                       lr=args.learning_rate,
                       correct_bias=True) # To reproduce BertAdam specific behaviour, use correct_bias=False
     scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=args.num_warmup_steps, num_training_steps=num_train_steps)
-
-
-    # Get training data
-    num_train_steps = None
-    max_seq_length = config.max_position_embeddings
-    if args.do_train:        
-        print("Preparing dataset using data from %s" % path_train_data)
-        train_dataset = BERTDataset(path_train_data, tokenizer, seq_len=max_seq_length,
-                                    nb_corpus_lines=None, on_memory=args.on_memory)
-        num_train_steps = int(len(train_dataset) / args.train_batch_size / args.gradient_accumulation_steps) * args.num_train_epochs
-        if args.local_rank != -1:
-            num_train_steps = num_train_steps // torch.distributed.get_world_size()
-
     
-    # Prepare training log
-    output_log_file = os.path.join(args.output_dir, "training_log.txt")
-    with open(output_log_file, "w") as f:
-        f.write("Steps\tTrainLoss\n")
 
     # Start training
     global_step = 0
