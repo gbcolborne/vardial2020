@@ -21,7 +21,7 @@ Code based on: https://github.com/huggingface/pytorch-pretrained-BERT/blob/maste
 
 """
 
-import os, random, argparse, logging, pickle, glob
+import os, random, argparse, logging, pickle, glob, math
 from io import open
 import numpy as np
 import torch
@@ -335,15 +335,15 @@ def main():
                         type=int,
                         help="Minimum character frequency. Characters whose frequency is under this threshold will be mapped to <UNK>")
     parser.add_argument("--learning_rate",
-                        default=3e-5,
+                        default=1e-4,
                         type=float,
                         help="The initial learning rate for Adam.")
-    parser.add_argument("--num_train_epochs",
-                        default=3.0,
-                        type=float,
-                        help="Total number of training epochs to perform.")
+    parser.add_argument("--num_train_steps",
+                        default=1000000,
+                        type=int,
+                        help="Total number of training steps to perform.")
     parser.add_argument("--num_warmup_steps",
-                        default=0,
+                        default=10000,
                         type=int,
                         help="Number of training steps to perform linear learning rate warmup for. ")
     parser.add_argument("--on_memory",
@@ -381,7 +381,7 @@ def main():
     else:
         pretrained=False
         config = BertConfig.from_json_file(args.bert_model_or_config_file)
-
+        
     # What GPUs do we use?
     if args.num_gpus == -1:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -400,7 +400,7 @@ def main():
         torch.distributed.init_process_group(backend='nccl')
     logger.info("device: {} n_gpu: {}, distributed training: {}".format(
         device, n_gpu, bool(args.local_rank != -1)))
-
+    
     # Check some other args
     if args.gradient_accumulation_steps < 1:
         raise ValueError("Invalid gradient_accumulation_steps parameter: {}, should be >= 1".format(
@@ -408,13 +408,13 @@ def main():
     args.train_batch_size = args.train_batch_size // args.gradient_accumulation_steps
     if not args.do_train:
         raise ValueError("Training is currently the only implemented execution option. Please set `do_train`.")
-    train_paths = glob.glob(os.path.join(args.dir_train_data, "*.train")
+    train_paths = glob.glob(os.path.join(args.dir_train_data, "*.train"))
     assert len(train_paths) > 0
     if os.path.exists(args.output_dir) and os.listdir(args.output_dir):
         raise ValueError("Output directory ({}) already exists and is not empty.".format(args.output_dir))
     if not os.path.exists(args.output_dir):
         os.makedirs(args.output_dir)
-
+                            
     # Seed RNGs
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -462,11 +462,17 @@ def main():
     if args.do_train:        
         print("Preparing dataset using data from %s" % train_paths)
         train_dataset = BERTDataset(train_paths, tokenizer, seq_len=max_seq_length,
-                                    nb_corpus_lines=None, on_memory=args.on_memory)
-        num_train_steps = int(len(train_dataset) / args.train_batch_size / args.gradient_accumulation_steps) * args.num_train_epochs
+                                    nb_corpus_lines=None, on_memory=args.on_memory)                            
+        num_steps_per_epoch = int(len(train_dataset) / args.train_batch_size / args.gradient_accumulation_steps) 
         if args.local_rank != -1:
-            num_train_steps = num_train_steps // torch.distributed.get_world_size()
-
+            num_steps_per_epoch = num_steps_per_epoch // torch.distributed.get_world_size()
+        num_epochs = math.ceil(args.num_train_steps / num_steps_per_epoch)
+        print("  Dataset size: %d" % len(train_dataset))
+        print("  # steps/epoch (with batch size = %d, # accumulation steps = %d): %d" % (args.train_batch_size,
+                                                                                         args.gradient_accumulation_steps,
+                                                                                         num_steps_per_epoch))
+        print("  # epochs (for %d steps): %d" % (args.num_train_steps, num_epochs))
+        
     # Prepare training log
     output_log_file = os.path.join(args.output_dir, "training_log.txt")
     with open(output_log_file, "w") as f:
@@ -503,7 +509,7 @@ def main():
         train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.train_batch_size)
 
         model.train()
-        for _ in trange(int(args.num_train_epochs), desc="Epoch"):
+        for _ in trange(int(num_epochs), desc="Epoch"):
             tr_loss = 0
             nb_tr_examples, nb_tr_steps = 0, 0
             for step, batch in enumerate(tqdm(train_dataloader, desc="Iteration")):
@@ -530,6 +536,8 @@ def main():
                     optimizer.zero_grad()
                     scheduler.step()
                     global_step += 1
+                    if global_step >= args.num_train_steps:
+                        break
             avg_loss = tr_loss / nb_tr_examples
 
             # Update training log
