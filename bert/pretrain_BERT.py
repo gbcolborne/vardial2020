@@ -423,25 +423,22 @@ def main():
                         default=10000,
                         type=int,
                         help="Number of training steps to perform linear learning rate warmup for. ")
-    parser.add_argument("--on_memory",
-                        action='store_true',
-                        help="Whether to load train samples into memory or use disk")
-    parser.add_argument("--local_rank",
-                        type=int,
-                        default=-1,
-                        help="local_rank for distributed training on gpus")
-    parser.add_argument("--num_gpus",
-                        type=int,
-                        default=-1,
-                        help="Num GPUs to use for training (0 for none, -1 for all available)")
-    parser.add_argument('--seed',
-                        type=int,
-                        default=42,
-                        help="random seed for initialization")
     parser.add_argument('--gradient_accumulation_steps',
                         type=int,
                         default=1,
                         help="Number of updates steps to accumualte before performing a backward/update pass.")
+    parser.add_argument("--num_gpus",
+                        type=int,
+                        default=-1,
+                        help="Num GPUs to use for training (0 for none, -1 for all available)")
+    parser.add_argument("--local_rank",
+                        type=int,
+                        default=-1,
+                        help="local_rank for distributed training on gpus")
+    parser.add_argument('--seed',
+                        type=int,
+                        default=42,
+                        help="random seed for initialization")
     args = parser.parse_args()
     
     # Check whether bert_model_or_config_file is a file or directory
