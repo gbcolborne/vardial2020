@@ -534,11 +534,12 @@ def main():
     # Get training data
     max_seq_length = args.seq_len + 2 # We add 2 for CLS and SEP
     print("Preparing dataset using data from %s" % args.dir_train_data)
-    train_dataset = BERTDataset(train_paths,
-                                tokenizer,
-                                seq_len=max_seq_length,
-                                sampling_distro=args.sampling_distro,
-                                encoding="utf-8")
+    train_dataset = BERTDataset(train_paths, tokenizer, seq_len=max_seq_length, sampling_distro=args.sampling_distro, encoding="utf-8")
+    if args.local_rank == -1:
+        train_sampler = RandomSampler(train_dataset)
+    else:
+        train_sampler = DistributedSampler(train_dataset)
+    train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.train_batch_size)
 
     num_steps_per_epoch = int(len(train_dataset) / args.train_batch_size / args.gradient_accumulation_steps) 
     if args.local_rank != -1:
@@ -567,7 +568,6 @@ def main():
                       correct_bias=True) # To reproduce BertAdam specific behaviour, use correct_bias=False
     scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=args.num_warmup_steps, num_training_steps=args.num_train_steps)
     
-
     # Start training
     global_step = 0
     total_tr_steps = 0
@@ -575,17 +575,17 @@ def main():
     logger.info("  Num examples = %d", len(train_dataset))
     logger.info("  Batch size = %d", args.train_batch_size)
     logger.info("  Num steps = %d", args.num_train_steps)
-
-    if args.local_rank == -1:
-        train_sampler = RandomSampler(train_dataset)
-    else:
-        #TODO: check if this works with current data generator from disk that relies on next(file)
-        # (it doesn't return item back by index)
-        train_sampler = DistributedSampler(train_dataset)
-    train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.train_batch_size)
-
     model.train()
-    for _ in trange(int(num_epochs), desc="Epoch"):
+    for epoch in trange(int(num_epochs), desc="Epoch"):
+        # Get fresh training samples
+        if epoch > 0:
+            logger.info("Resampling training set...")
+            train_dataset.resample()
+            if args.local_rank == -1:
+                train_sampler = RandomSampler(train_dataset)
+            else:
+                train_sampler = DistributedSampler(train_dataset)
+            train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.train_batch_size)
         tr_loss = 0
         nb_tr_examples, nb_tr_steps = 0, 0
         for step, batch in enumerate(tqdm(train_dataloader, desc="Iteration")):
