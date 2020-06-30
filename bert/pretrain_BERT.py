@@ -533,7 +533,6 @@ def main():
 
 
     # Get training data
-    num_train_steps = None
     max_seq_length = args.seq_len + 2 # We add 2 for CLS and SEP
     if args.do_train:        
         print("Preparing dataset using data from %s" % args.dir_train_data)
@@ -568,7 +567,7 @@ def main():
     optimizer = AdamW(optimizer_grouped_parameters,
                       lr=args.learning_rate,
                       correct_bias=True) # To reproduce BertAdam specific behaviour, use correct_bias=False
-    scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=args.num_warmup_steps, num_training_steps=num_train_steps)
+    scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=args.num_warmup_steps, num_training_steps=args.num_train_steps)
     
 
     # Start training
@@ -578,7 +577,7 @@ def main():
         logger.info("***** Running training *****")
         logger.info("  Num examples = %d", len(train_dataset))
         logger.info("  Batch size = %d", args.train_batch_size)
-        logger.info("  Num steps = %d", num_train_steps)
+        logger.info("  Num steps = %d", args.num_train_steps)
 
         if args.local_rank == -1:
             train_sampler = RandomSampler(train_dataset)
