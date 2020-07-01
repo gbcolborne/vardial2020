@@ -49,6 +49,13 @@ def count_params(model):
     return count
 
 
+def check_for_unk_train_data(train_paths):
+    for path in train_paths:
+        if os.path.split(path)[-1] == "unk.train":
+            return path
+    return None
+
+
 def main():
     parser = argparse.ArgumentParser()
 
@@ -199,11 +206,20 @@ def main():
     logger.info("Model config: %s" % repr(model.config))
     logger.info("Nb params: %d" % count_params(model))
 
+    # Check if there is unknown training data
+    path_unk = check_for_unk_train_data(train_paths)
+    unk_only_for_unlabeled = True if path_unk is not None else False
 
     # Get training data
     max_seq_length = args.seq_len + 2 # We add 2 for CLS and SEP
     logger.info("Preparing dataset using data from %s" % args.dir_train_data)
-    train_dataset = BertDatasetUnlabeled(train_paths, tokenizer, seq_len=max_seq_length, sampling_distro=args.sampling_distro, encoding="utf-8", seed=args.seed)
+    train_dataset = BertDatasetUnlabeled(train_paths,
+                                         tokenizer,
+                                         unk_only=unk_only_for_unlabeled,
+                                         seq_len=max_seq_length,
+                                         sampling_distro=args.sampling_distro,
+                                         encoding="utf-8",
+                                         seed=args.seed)
     if args.local_rank == -1:
         train_sampler = RandomSampler(train_dataset)
     else:
