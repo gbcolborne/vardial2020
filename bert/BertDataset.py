@@ -46,21 +46,283 @@ def line_to_data(line, is_labeled):
         text = line.strip()
         label = None
     return (text, label)
-    
 
-class BertDatasetUnlabeled(Dataset):
+
+class InputExampleUnlabeled(object):
+    """A single training/test example for masked language modeling only."""
+
+    def __init__(self, guid, tokens, lm_labels=None):
+        """Constructs a InputExample.
+        Args:
+            guid: Unique id for the example.
+            tokens: list of strings. The tokens.
+            labels: (Optional) string. The language model labels of the example.
+        """
+        self.guid = guid
+        self.tokens = tokens
+        self.lm_labels = lm_labels 
+
+
+class InputExampleLabeled(object):
+    """A single training/test example for masked language modeling and sentence pair classification. """
+
+    def __init__(self, guid, tokens, lm_labels=None):
+        """Constructs a InputExample.
+        Args:
+            guid: Unique id for the example.
+            tokens_query: list of strings. The tokens of the query (text sample).
+            tokens_pos: list of strings. The tokens of the positive candidate for this query (from same language).
+            tokens_neg: list of strings. The tokens of the negative candidate for this query (from other language).
+            lm_labels: (Optional) string. The language model labels of the example.
+        """
+        self.guid = guid
+        self.tokens_query = tokens_query
+        self.tokens_pos = tokens_pos
+        self.tokens_neg = tokens_neg
+        self.lm_labels = lm_labels 
+        
+
+class InputFeaturesUnlabeled(object):
+    """A single set of features of data for masked language modeling only."""
+
+    def __init__(self, input_ids, input_mask, segment_ids, lm_label_ids):
+        self.input_ids = input_ids # List input token IDs
+        self.input_mask = input_mask # List containing input mask 
+        self.segment_ids = segment_ids # List containing input mask 
+        self.lm_label_ids = lm_label_ids # List containing LM label IDs 
+
+
+class InputFeaturesLabeled(object):
+    """A single set of features of data for both masked language modeling and sentence pair classification."""
+
+    def __init__(self, input_ids_query, input_mask_query, segment_ids_query, input_ids_cands, input_mask_cands, segment_ids_cands, cand_labels, lm_label_ids_query):
+        self.input_ids_query = input_ids_query # List of query input IDs
+        self.input_mask_query = input_mask_query # List containing input mask of query        
+        self.segment_ids_query = segment_ids_query # List of query token type (segment) IDs
+        self.input_ids_cands = input_ids_cands # List of lists of candidate input IDs
+        self.input_mask_cands = input_mask_cands # List of lists containing input mask of candidates
+        self.segment_ids_cands = segment_ids_cands # List of lists of candidate token type (segment) IDs
+        self.cand_labels = cand_labels # List of candidate labels (1 for same language, 0 for different language)
+        self.lm_label_ids_query = lm_label_ids_query # List containing LM label IDs of query
+
+
+def mask_random_tokens(tokens, tokenizer):
+    """
+    Masking some random tokens for masked language modeling with probabilities as in the original BERT paper.
+
+    :param tokens: list of str, tokenized sentence.
+    :param tokenizer: Tokenizer, object used for tokenization (we need it's vocab here)
+    :return: (list of str, list of int), masked tokens and related labels for LM prediction
+    """
+    output_label = []
+    for i, token in enumerate(tokens):
+        prob = random.random()
+        # mask token with 15% probability
+        if prob < 0.15:
+            prob /= 0.15
+
+            # 80% randomly change token to mask token
+            if prob < 0.8:
+                tokens[i] = "[MASK]"
+
+            # 10% randomly change token to random token
+            elif prob < 0.9:
+                tokens[i] = random.choice(list(tokenizer.vocab.items()))[0]
+
+            # -> rest 10% randomly keep current token
+
+            # append current token to output (we will predict these later)
+            try:
+                output_label.append(tokenizer.vocab[token])
+            except KeyError:
+                # For unknown words (should not occur with BPE vocab)
+                output_label.append(tokenizer.vocab["[UNK]"])
+                logger.warning("Cannot find token '{}' in vocab. Using [UNK] instead".format(token))
+        else:
+            output_label.append(NO_MASK_LABEL)
+
+    return tokens, output_label
+
+
+def convert_unlabeled_example_to_features(example, max_seq_length, tokenizer):
+    """Convert a raw sample (a sentence as tokenized strings) into a
+    proper training sample for MLM only, with IDs, LM labels,
+    input_mask, CLS and SEP tokens etc.
+
+    :param example: InputExampleUnlabeled, containing sentence input as lists of tokens.
+    :param max_seq_length: int, maximum length of sequence.
+    :param tokenizer: Tokenizer
+    :return: InputFeaturesUnlabeled, containing all inputs and labels of one sample as IDs (as used for model training)
+
+    """
+    tokens = example.tokens
+
+    # Truncate sequence if necessary. Account for [CLS] and [SEP] by subtracting 2.
+    tokens = tokens[:max_seq_length-2]
+
+    # Mask tokens for MLM
+    tokens, lm_label_ids = mask_random_tokens(tokens, tokenizer)
+    tokens = ["[CLS]"] + tokens + ["[SEP]"]
+    lm_label_ids = [NO_MASK_LABEL] + lm_label_ids + [NO_MASK_LABEL]
+    segment_ids = [0] * len(tokens)
+    input_ids = tokenizer.convert_tokens_to_ids(tokens)
+
+    # The mask has 1 for real tokens and 0 for padding tokens. Only real
+    # tokens are attended to.
+    input_mask = [1] * len(input_ids)
+
+    # Zero-pad up to the sequence length.
+    while len(input_ids) < max_seq_length:
+        input_ids.append(0)
+        input_mask.append(0)
+        segment_ids.append(0)
+        lm_label_ids.append(NO_MASK_LABEL)
+    assert len(input_ids) == max_seq_length
+    assert len(input_mask) == max_seq_length
+    assert len(segment_ids) == max_seq_length
+    assert len(lm_label_ids) == max_seq_length
+
+    if example.guid < 5:
+        logger.info("*** Example ***")
+        logger.info("guid: {}".format(example.guid))
+        logger.info("tokens: {}".format(tokens))
+        logger.info("input_ids: {}".format(input_ids))
+        logger.info("input_mask: {}".format(input_mask))
+        logger.info("segment_ids: {}".format(segment_ids))
+        logger.info("lm_label_ids: {}".format(lm_label_ids))
+
+    features = InputFeaturesUnlabeled(input_ids=input_ids,
+                                      input_mask=input_mask,
+                                      segment_ids=segment_ids,
+                                      lm_label_ids=lm_label_ids)
+    return features
+
+
+def convert_labeled_example_to_features(example, max_seq_length, tokenizer):
+    """Convert a raw sample (a sentence as tokenized strings) into a
+    proper training sample for both MLM and SPC, with IDs, LM labels,
+    input_mask, candidate labels for sentence pair classification, CLS
+    and SEP tokens, etc.
+
+    :param example: InputExampleLabeled, containing sentence inputs as lists of tokens.
+    :param max_seq_length: int, maximum length of sequence.
+    :param tokenizer: Tokenizer
+    :return: InputFeaturesLabeled, containing all inputs and labels of one sample as IDs (as used for model training)
+
+    """
+    tokens_query = example.tokens_query
+    tokens_pos = example.tokens_pos
+    tokens_neg = example.token_neg
     
+    # Truncate sequence if necessary. Account for [CLS] and [SEP] by subtracting 2.
+    tokens_query = tokens_query[:max_seq_length-2]
+    tokens_pos = tokens_pos[:max_seq_length-2]
+    tokens_neg = tokens_neg[:max_seq_length-2]    
+    
+    # Mask tokens for MLM
+    tokens_query, lm_label_ids_query = mask_random_tokens(tokens_query, tokenizer)
+
+    # Add CLS and SEP
+    tokens_query = ["[CLS]"] + tokens_query + ["[SEP]"]
+    tokens_pos = ["[CLS]"] + tokens_pos + ["[SEP]"]
+    tokens_neg = ["[CLS]"] + tokens_neg + ["[SEP]"]
+    lm_label_ids_query = [NO_MASK_LABEL] + lm_label_ids_query + [NO_MASK_LABEL]
+
+    # Get input token IDs (unpadded)
+    input_ids_query = tokenizer.convert_tokens_to_ids(tokens_query)
+    input_ids_pos = tokenizer.convert_tokens_to_ids(tokens_pos)
+    input_ids_neg = tokenizer.convert_tokens_to_ids(tokens_neg)
+    
+    # Zero-pad input token IDs
+    input_ids_query += [0] * (max_seq_length - len(tokens_query))
+    input_ids_pos += [0] * (max_seq_length - len(tokens_pos))
+    input_ids_neg += [0] * (max_seq_length - len(tokens_neg))    
+    
+    # Zero-pad labels
+    lm_label_ids_query += [NO_MASK_LABEL] * (max_seq_length - len(tokens_query))
+
+    # Make input mask (1 for real tokens and 0 for padding tokens)
+    input_mask_query = [1] * len(tokens_query) + [0] * (max_seq_length - len(tokens_query))
+    input_mask_pos = [1] * len(tokens_pos) + [0] * (max_seq_length - len(tokens_pos))
+    input_mask_neg = [1] * len(tokens_neg) + [0] * (max_seq_length - len(tokens_neg))                                                          
+    
+    # Make segment IDs (padded)
+    segment_ids_query = [0] * max_seq_length
+    segment_ids_cands = [[0] * max_seq_length, [0] * max_seq_length]
+    
+    # Decide in what order we place the positive and negative examples
+    FLIP = random.random() > 0.5
+    
+    # Package candidate inputs and masks, and make labels
+    if FLIP:
+        cand_labels = [0,1]
+        input_ids_cands = [input_ids_neg, input_ids_pos]
+        input_mask_cands = [input_mask_neg, input_mask_pos]
+    else:
+        cand_labels = [1,0]
+        input_ids_cands = [input_ids_pos, input_ids_neg]
+        input_mask_cands = [input_mask_pos, input_mask_neg]
+    
+    # Check data
+    assert len(input_ids_query) == max_seq_length
+    assert len(input_ids_cands) == 2
+    assert len(input_ids_cands[0]) == max_seq_length
+    assert len(input_ids_cands[1]) == max_seq_length
+    assert len(input_mask_query) == max_seq_length
+    assert len(input_mask_cands) == 2
+    assert len(input_mask_cands[0]) == max_seq_length
+    assert len(input_mask_cands[1]) == max_seq_length
+    assert len(segment_ids_query) == max_seq_length
+    assert len(segment_ids_cands) == 2
+    assert len(segment_ids_cands[0]) == max_seq_length
+    assert len(segment_ids_cands[1]) == max_seq_length
+    assert len(cand_labels) == 2
+    assert len(lm_label_ids_query) == max_seq_length
+
+    # Print a few examples.
+    if example.guid < 5:
+        logger.info("*** Example ***")
+        logger.info("guid: {}".format(example.guid))
+        logger.info("tokens_query: {}".format(tokens_query))
+        logger.info("input_ids_query: {}".format(input_ids_query))
+        logger.info("input_mask_query: {}".format(input_mask_query))
+        logger.info("segment_ids_query: {}".format(segment_ids_query))        
+        logger.info("tokens_pos: {}".format(tokens_pos))
+        logger.info("tokens_neg: {}".format(tokens_neg))        
+        logger.info("input_ids_cands: {}".format(input_ids_cands))
+        logger.info("input_mask_cands: {}".format(input_mask_cands))        
+        logger.info("segment_ids_cands: {}".format(segment_ids_cands))        
+        logger.info("cand_labels: {}".format(cand_labels))
+        logger.info("lm_label_ids_query: {}".format(lm_label_ids_query))
+
+    features = InputFeaturesLabeled(input_ids_query,
+                                    input_mask_query,
+                                    segment_ids_query,
+                                    input_ids_cands,
+                                    input_mask_cands,
+                                    segment_ids_cands,
+                                    cand_labels,
+                                    lm_label_ids_query)
+    return features
+
+
+class BertDataset(Dataset):
+
+    """ Abstract class, subclassed by BertDatasetLabeled and BertDatasetUnlabeled. These must implement `__getitem__`, as well as `resample`. """
+
     def __init__(self, train_paths, tokenizer, seq_len, sampling_distro="uniform", encoding="utf-8", seed=None):
         assert sampling_distro in ["uniform", "relfreq", "dampfreq"]
         self.train_paths = train_paths # Paths of training files (names must match <lang>.train)
         self.tokenizer = tokenizer
         self.vocab = tokenizer.vocab
-        self.seq_len = seq_len
+        self.seq_len = seq_len # Includes CLS and SEP tokens
         self.sampling_distro = sampling_distro
         self.encoding = encoding        
         self.sample_counter = 0  # total number of examples sampled by calling __getitem__ (across all epochs)
         self.total_dataset_size = 0
         self.sampled_dataset_size = REL_SAMPLE_SIZE + CON_SAMPLE_SIZE + IRR_SAMPLE_SIZE
+        self.lang_list = []
+        self.lang2id = {}
         self.lang2path = {}
         self.lang2file = {}
         self.lang2freq = {}
@@ -68,7 +330,7 @@ class BertDatasetUnlabeled(Dataset):
         self.lang2ix = {}
         self.lang2samplesize = {}
         self.sampled_dataset = None
-
+        
         if seed:
             random.seed(seed)            
             np.random.seed(seed)
@@ -97,18 +359,21 @@ class BertDatasetUnlabeled(Dataset):
             # Check which of the 3 groups this lang belongs to
             group = get_lang_group(lang)
             self.group2freq[group] += self.lang2freq[lang]
+        self.lang_list = sorted(lang2freq.keys())
+        self.lang2id = {x:i for i,x in enumerate(lang_list)}
         logger.info("Total dataset size: %d" % self.total_dataset_size)
         logger.info("Sampled dataset size: %d" % self.sampled_dataset_size)
 
         # Compute expected number of examples sampled from each language
         self.lang2samplesize = self.compute_expected_sample_sizes()
         logger.info("Sum of expected sample sizes per language: %d" % (sum(self.lang2samplesize.values())))
-
-        # Sample a training set
-        self.resample()
         return
+
+
+    def __len__(self):
+        return self.sampled_dataset_size
     
-        
+
     def compute_expected_sample_sizes(self):
         # Map langs in the 3 groups to IDs
         rel_langs = sorted(RELEVANT_LANGS)
@@ -157,6 +422,17 @@ class BertDatasetUnlabeled(Dataset):
         return lang2samplesize
 
     
+class BertDatasetUnlabeled(BertDataset):
+    
+    def __init__(self, train_paths, tokenizer, seq_len, sampling_distro="uniform", encoding="utf-8", seed=None):
+        # Init parent class
+        super().__init__(train_paths, tokenizer, seq_len, sampling_distro=sampling_distro, encoding=encoding, seed=seed)
+
+        # Sample a training set
+        self.resample() 
+        return
+    
+    
     def resample(self):
         """ Sample dataset by lazily loading part of the data from disk. """
         data = []
@@ -181,17 +457,13 @@ class BertDatasetUnlabeled(Dataset):
         return None
 
     
-    def __len__(self):
-        return self.sampled_dataset_size
-
-    
     def __getitem__(self, item):
         t = self.sampled_dataset[item]
         example_id = self.sample_counter
         self.sample_counter += 1
         tokens = self.tokenizer.tokenize(t)
-        example = InputExample(guid=example_id, tokens=tokens)
-        features = convert_example_to_features(example, self.seq_len, self.tokenizer)
+        example = InputExampleUnlabeled(guid=example_id, tokens=tokens)
+        features = convert_unlabeled_example_to_features(example, self.seq_len, self.tokenizer)
         tensors = (torch.tensor(features.input_ids),
                    torch.tensor(features.input_mask),
                    torch.tensor(features.segment_ids),
@@ -199,147 +471,122 @@ class BertDatasetUnlabeled(Dataset):
         return tensors
 
 
-class InputExample(object):
-    """A single training/test example for the language model."""
-
-    def __init__(self, guid, tokens, lm_labels=None):
-        """Constructs a InputExample.
-        Args:
-            guid: Unique id for the example.
-            tokens: list of strings. The tokens.
-            labels: (Optional) string. The language model labels of the example.
-        """
-        self.guid = guid
-        self.tokens = tokens
-        self.lm_labels = lm_labels 
-
-
-class InputFeatures(object):
-    """A single set of features of data."""
-
-    def __init__(self, input_ids, input_mask, segment_ids, lm_label_ids):
-        self.input_ids = input_ids
-        self.input_mask = input_mask
-        self.segment_ids = segment_ids
-        self.lm_label_ids = lm_label_ids
-
-
-def random_word(tokens, tokenizer):
-    """
-    Masking some random tokens for Language Model task with probabilities as in the original BERT paper.
-    :param tokens: list of str, tokenized sentence.
-    :param tokenizer: Tokenizer, object used for tokenization (we need it's vocab here)
-    :return: (list of str, list of int), masked tokens and related labels for LM prediction
-    """
-    output_label = []
-    for i, token in enumerate(tokens):
-        prob = random.random()
-        # mask token with 15% probability
-        if prob < 0.15:
-            prob /= 0.15
-
-            # 80% randomly change token to mask token
-            if prob < 0.8:
-                tokens[i] = "[MASK]"
-
-            # 10% randomly change token to random token
-            elif prob < 0.9:
-                tokens[i] = random.choice(list(tokenizer.vocab.items()))[0]
-
-            # -> rest 10% randomly keep current token
-
-            # append current token to output (we will predict these later)
-            try:
-                output_label.append(tokenizer.vocab[token])
-            except KeyError:
-                # For unknown words (should not occur with BPE vocab)
-                output_label.append(tokenizer.vocab["[UNK]"])
-                logger.warning("Cannot find token '{}' in vocab. Using [UNK] instead".format(token))
-        else:
-            output_label.append(NO_MASK_LABEL)
-
-    return tokens, output_label
-
-
-def convert_example_to_features(example, max_seq_length, tokenizer):
-    """
-    Convert a raw sample (a sentence as tokenized strings) into a proper training sample with
-    IDs, LM labels, input_mask, CLS and SEP tokens etc.
-    :param example: InputExample, containing sentence input as strings
-    :param max_seq_length: int, maximum length of sequence.
-    :param tokenizer: Tokenizer
-    :return: InputFeatures, containing all inputs and labels of one sample as IDs (as used for model training)
-    """
-    tokens = example.tokens
-
-    # Modify `tokens` in place so that the total
-    # length is less than the specified length.
-    # Account for [CLS], [SEP] with "- 2"
-    tokens = tokens[:max_seq_length-2]
-
-    tokens, t_label = random_word(tokens, tokenizer)
-
-    # concatenate lm labels and account for CLS, SEP
-    lm_label_ids = ([NO_MASK_LABEL] + t_label + [NO_MASK_LABEL])
-
-    # The convention in BERT is:
-    # (a) For sequence pairs:
-    #  tokens:   [CLS] is this jack ##son ##ville ? [SEP] no it is not . [SEP]
-    #  type_ids: 0   0  0    0    0     0       0 0    1  1  1  1   1 1
-    # (b) For single sequences:
-    #  tokens:   [CLS] the dog is hairy . [SEP]
-    #  type_ids: 0   0   0   0  0     0 0
-    #
-    # Where "type_ids" are used to indicate whether this is the first
-    # sequence or the second sequence. The embedding vectors for `type=0` and
-    # `type=1` were learned during pre-training and are added to the wordpiece
-    # embedding vector (and position vector). This is not *strictly* necessary
-    # since the [SEP] token unambigiously separates the sequences, but it makes
-    # it easier for the model to learn the concept of sequences.
-    #
-    # For classification tasks, the first vector (corresponding to [CLS]) is
-    # used as as the "sentence vector". Note that this only makes sense because
-    # the entire model is fine-tuned.
-    out_tokens = []
-    segment_ids = []
-    out_tokens.append("[CLS]")
-    segment_ids.append(0)
-    for token in tokens:
-        out_tokens.append(token)
-        segment_ids.append(0)
-    out_tokens.append("[SEP]")
-    segment_ids.append(0)
-
-    input_ids = tokenizer.convert_tokens_to_ids(out_tokens)
-
-    # The mask has 1 for real tokens and 0 for padding tokens. Only real
-    # tokens are attended to.
-    input_mask = [1] * len(input_ids)
-
-    # Zero-pad up to the sequence length.
-    while len(input_ids) < max_seq_length:
-        input_ids.append(0)
-        input_mask.append(0)
-        segment_ids.append(0)
-        lm_label_ids.append(NO_MASK_LABEL)
-
-    assert len(input_ids) == max_seq_length
-    assert len(input_mask) == max_seq_length
-    assert len(segment_ids) == max_seq_length
-    assert len(lm_label_ids) == max_seq_length
-
-    if example.guid < 5:
-        logger.info("*** Example ***")
-        logger.info("guid: {}".format(example.guid))
-        logger.info("tokens: {}".format(tokens))
-        logger.info("input_ids: {}".format(input_ids))
-        logger.info("input_mask: {}".format(input_mask))
-        logger.info("segment_ids: {}".format(segment_ids))
-        logger.info("lm_label_ids: {}".format(lm_label_ids))
-
-    features = InputFeatures(input_ids=input_ids,
-                             input_mask=input_mask,
-                             segment_ids=segment_ids,
-                             lm_label_ids=lm_label_ids)
-    return features
+class BertDatasetLabeled(BertDataset):
     
+    def __init__(self, train_paths, tokenizer, seq_len, sampling_distro="uniform", encoding="utf-8", seed=None):
+        # Init parent class
+        super().__init__(train_paths, tokenizer, seq_len, sampling_distro=sampling_distro, encoding=encoding, seed=seed)
+
+        # Sample a training set
+        self.resample()
+
+        # Compute sampling probabilities for negative candidates
+        counts = np.array([lang2samplesize[k] for k in self.lang_list], dtype=float)
+        probs = counts / counts.sum()
+        # Dampen
+        damp = probs ** 0.5
+        probs = damp / damp.sum()
+        self.neg_sampling_probs = probs
+
+        # Make a buffer of negative candidates
+        self.neg_buffer_size = 2*len(self)
+        self.neg_buffer = self._get_neg_buffer()
+        self.neg_buffer_ix = 0
+        return
+
+
+    def _get_neg_buffer(self):
+         return np.random.choice(np.arange(0,len(self.lang_list)), self.neg_buffer_size, replace=True, p=self.neg_sampling_probs)
+
+    
+    def _sample_language_for_neg_sampling(self):
+        """ Sample language for negative sampling. Return ID of language. """
+        sampled_id = self.neg_buffer[neg_buffer_ix]
+        self.neg_buffer_ix += 1
+        if self.neg_buffer_ix == self.neg_buffer_size
+            self.neg_buffer = self._get_neg_buffer()
+            self.neg_buffer_ix = 0
+        return sampled_id
+
+    
+    def resample(self):
+        """ Sample dataset by lazily loading part of the data from disk. """
+        lang2texts = {}
+        for lang in self.lang_list:
+            # Check how many examples we sample for this lang
+            sample_size = self.lang2samplesize[lang]
+            texts = []
+            for _ in range(sample_size):
+                # Check if we have reached EOF
+                if self.lang2ix[lang] >= (self.lang2freq[lang]-1):
+                    self.lang2file[lang].close()
+                    self.lang2file[lang] = open(self.lang2path[lang], "r", encoding=self.encoding)
+                    self.lang2ix[lang] = 0
+                line = next(self.lang2file[lang])
+                self.lang2ix[lang] += 1
+                (text,_) = line_to_data(line, False)
+                assert text is not None and len(text)
+                texts.append(text)
+            lang2texts[lang] = texts
+        assert sum(len(x) for x in lang2texts.values()) == self.sampled_dataset_size
+        
+        # Now pick a positive candidate and a negative candidate for each query
+        queries = []
+        pos_candidates = []
+        neg_candidates = []
+        for lang in self.lang_list:
+            texts = lang2texts[lang]
+            if len(texts) < 1:
+                msg = "We must have 2 samples from each language. "
+                msg += "Increase sample size or use a different sampling_distro."
+                raise RuntimeError(msg)
+
+            # Sample positive candidate from same language
+            for i in range(len(texts)):
+                others = list(range(0,i)) + list(range(i+1,len(texts)))
+                j = random.choice(others)
+                queries.append(texts[i])
+                pos_candidates.append(texts[j])
+                
+            # Sample negative candidate from another language. First
+            # we sample the language, according to their relative
+            # frequency in our sample of texts
+            sampled_lang = None
+            while sampled_lang is None:
+                sampled_id = self._sample_language_for_neg_sampling()
+                if lang_list[sampled_id] != lang:
+                    sampled_lang = lang_list[sampled_id]
+            # Now we sample a text at random
+            neg_candidate = random.choice(lang2texts[sampled_lang])
+            neg_candidates.append(neg_candidate)
+        assert len(queries) == len(pos_candidates)
+        assert len(queries) == len(neg_candidates)
+        data = zip(queries, pos_candidates, neg_candidates)
+        
+        # Shuffle
+        np.random.shuffle(data)
+        self.sampled_dataset = data
+        return None
+
+    
+    def __getitem__(self, item):
+        (q,p,n) = self.sampled_dataset[item]
+        example_id = self.sample_counter
+        self.sample_counter += 1
+        tokens_query = self.tokenizer.tokenize(q)
+        tokens_pos = self.tokenizer.tokenize(p)
+        tokens_neg = self.tokenizer.tokenize(n)        
+        example = InputExampleLabeled(guid=example_id, tokens_query=tokens_query, tokens_pos=tokens_pos, tokens_neg=tokens_neg)
+        features = convert_labeled_example_to_features(example, self.seq_len, self.tokenizer)
+        tensors = (torch.tensor(features.input_ids_query),
+                   torch.tensor(features.input_mask_query),
+                   torch.tensor(features.segment_ids_query),
+                   torch.tensor(features.input_ids_cands),
+                   torch.tensor(features.input_mask_cands),
+                   torch.tensor(features.segment_ids_cands),
+                   torch.tensor(features.cand_labels),
+                   torch.tensor(features.lm_label_ids_query))
+        return tensors
+    
+
+
