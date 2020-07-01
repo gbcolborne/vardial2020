@@ -33,7 +33,7 @@ from transformers import AdamW
 from transformers.optimization import get_linear_schedule_with_warmup
 from tqdm import tqdm, trange
 from CharTokenizer import CharTokenizer
-from BertDataset import BertDatasetUnlabeled
+from BertDataset import BertDatasetUnlabeled, BertDatasetLabeled
 
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(name)s -   %(message)s',
@@ -77,6 +77,10 @@ def main():
                         help="The output directory where the model checkpoints will be written.")
 
     ## Other parameters
+    parser.add_argument("--mlm_only",
+                        action="store_true",
+                        help=("Use only masked language modeling, no sentence pair classification "
+                              " (e.g. if you only have unk.train in your training directory)"))
     parser.add_argument("--sampling_distro",
                         choices=["uniform", "relfreq", "dampfreq"],
                         default="relfreq",
@@ -206,20 +210,51 @@ def main():
     logger.info("Model config: %s" % repr(model.config))
     logger.info("Nb params: %d" % count_params(model))
 
-    # Check if there is unknown training data
+    # Check if there is unk training data. 
     path_unk = check_for_unk_train_data(train_paths)
-    unk_only_for_unlabeled = True if path_unk is not None else False
 
     # Get training data
     max_seq_length = args.seq_len + 2 # We add 2 for CLS and SEP
     logger.info("Preparing dataset using data from %s" % args.dir_train_data)
-    train_dataset = BertDatasetUnlabeled(train_paths,
-                                         tokenizer,
-                                         unk_only=unk_only_for_unlabeled,
-                                         seq_len=max_seq_length,
-                                         sampling_distro=args.sampling_distro,
-                                         encoding="utf-8",
-                                         seed=args.seed)
+    if args.mlm_only:
+        # We only want to do MLM
+        train_dataset_spc = None
+        train_dataset_mlm = BertDatasetUnlabeled(train_paths,
+                                                 tokenizer,
+                                                 unk_only=False,
+                                                 seq_len=max_seq_length,
+                                                 sampling_distro=args.sampling_distro,
+                                                 encoding="utf-8",
+                                                 seed=args.seed)
+    else:
+        # We want do to SLC and MLM. If unk data is present, we remove
+        # it from the paths provided to BertLabeledDataset.
+        if path_unk is not None:
+            train_paths.remove(path_unk)
+        train_dataset_spc = BertDatasetLabeled(train_paths,
+                                               tokenizer,
+                                               seq_len=max_seq_length,
+                                               sampling_distro=args.sampling_distro,
+                                               encoding="utf-8",
+                                               seed=args.seed)
+        if path_unk is None:
+            train_dataset_mlm = None
+        else:
+            # In this case we use a BertDatasetUnlabeled for the unk
+            # data. Both datasets will be of the same size. The latter
+            # is used for MLM only.
+            train_dataset_mlm = BertDatasetUnlabeled([path_unk],
+                                                     tokenizer,
+                                                     unk_only=True,
+                                                     seq_len=max_seq_length,
+                                                     sampling_distro=args.sampling_distro,
+                                                     encoding="utf-8",
+                                                     seed=args.seed)
+            assert len(train_dataset_spc) == len(train_dataset_mlm)
+
+    sys.exit()
+    #### TODO: Adapt samplers and dataloaders to be dual like the train dataset: mlm and spc
+        
     if args.local_rank == -1:
         train_sampler = RandomSampler(train_dataset)
     else:

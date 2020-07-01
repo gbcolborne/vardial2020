@@ -25,6 +25,13 @@ logging.basicConfig(format='%(asctime)s - %(levelname)s - %(name)s -   %(message
 logger = logging.getLogger(__name__)
 
 
+def check_for_unk_train_data(train_paths):
+    for path in train_paths:
+        if os.path.split(path)[-1] == "unk.train":
+            return path
+    return None
+
+
 def get_lang_group(lang):
     if lang == "unk":
         return "unk"
@@ -319,10 +326,11 @@ class BertDataset(Dataset):
 
     """ Abstract class, subclassed by BertDatasetLabeled and BertDatasetUnlabeled. These must implement `__getitem__`, as well as `resample`. """
 
-    def __init__(self, train_paths, tokenizer, seq_len, unk_only=False, sampling_distro="uniform", encoding="utf-8", seed=None):
+    def __init__(self, train_paths, tokenizer, seq_len, size, unk_only=False, sampling_distro="uniform", encoding="utf-8", seed=None):
         assert sampling_distro in ["uniform", "relfreq", "dampfreq"]
         self.tokenizer = tokenizer
         self.vocab = tokenizer.vocab
+        self.sampled_dataset_size = size # Expected size (will be enforced)        
         self.unk_only = unk_only
         self.seq_len = seq_len # Includes CLS and SEP tokens
         self.sampling_distro = sampling_distro
@@ -337,8 +345,6 @@ class BertDataset(Dataset):
         self.group2freq = {"rel":0, "con":0, "irr":0, "unk":0}
         self.lang2ix = {} # Maps to the current index in the training file
         self.lang2samplesize = {}
-        self.sampled_dataset = None
-        self.sampled_dataset_size = REL_SAMPLE_SIZE + CON_SAMPLE_SIZE + IRR_SAMPLE_SIZE + UNK_SAMPLE_SIZE
         
         if seed:
             random.seed(seed)            
@@ -379,11 +385,12 @@ class BertDataset(Dataset):
         self.lang_list = sorted(self.lang2freq.keys())
         self.lang2id = {x:i for i,x in enumerate(self.lang_list)}
         logger.info("Total dataset size: %d" % self.total_dataset_size)
-        logger.info("Sampled dataset size: %d" % self.sampled_dataset_size)
+        logger.info("Sampled dataset size (expectected): %d" % self.sampled_dataset_size)
 
         # Compute expected number of examples sampled from each language
         self.lang2samplesize = self.compute_expected_sample_sizes()
         logger.info("Sum of expected sample sizes per language: %d" % (sum(self.lang2samplesize.values())))
+        assert sum(self.lang2samplesize.values()) == self.sampled_dataset_size
         return
 
 
@@ -393,9 +400,7 @@ class BertDataset(Dataset):
 
     def compute_expected_sample_sizes(self):
         if self.unk_only:
-            sample_size = REL_SAMPLE_SIZE + CON_SAMPLE_SIZE + IRR_SAMPLE_SIZE + UNK_SAMPLE_SIZE
-            logger.warning("Replaced UNK_SAMPLE_SIZE with sum of all 4 sample sizes")
-            lang2samplesize = {'unk': sample_size}
+            lang2samplesize = {'unk': self.sampled_dataset_size}
             return lang2samplesize
         
         # Map langs in the 3 groups to IDs
@@ -453,8 +458,11 @@ class BertDatasetUnlabeled(BertDataset):
     
     def __init__(self, train_paths, tokenizer, seq_len, unk_only=False, sampling_distro="uniform", encoding="utf-8", seed=None):
         # Init parent class
-        super().__init__(train_paths, tokenizer, seq_len, unk_only=unk_only, sampling_distro=sampling_distro, encoding=encoding, seed=seed)
-
+        size = REL_SAMPLE_SIZE + CON_SAMPLE_SIZE + IRR_SAMPLE_SIZE
+        if not unk_only and check_for_unk_train_data(train_paths) is not None:
+            size += UNK_SAMPLE_SIZE
+        super().__init__(train_paths, tokenizer, seq_len, size, unk_only=unk_only, sampling_distro=sampling_distro, encoding=encoding, seed=seed)
+        
         # Sample a training set
         self.resample() 
         return
@@ -502,14 +510,13 @@ class BertDatasetUnlabeled(BertDataset):
 class BertDatasetLabeled(BertDataset):
     
     def __init__(self, train_paths, tokenizer, seq_len, sampling_distro="uniform", encoding="utf-8", seed=None):
+        size = REL_SAMPLE_SIZE + CON_SAMPLE_SIZE + IRR_SAMPLE_SIZE
+        
         # Init parent class
-        super().__init__(train_paths, tokenizer, seq_len, sampling_distro=sampling_distro, encoding=encoding, seed=seed)
-
-        # Sample a training set
-        self.resample()
+        super().__init__(train_paths, tokenizer, seq_len, size, sampling_distro=sampling_distro, encoding=encoding, seed=seed)
 
         # Compute sampling probabilities for negative candidates
-        counts = np.array([lang2samplesize[k] for k in self.lang_list], dtype=float)
+        counts = np.array([self.lang2samplesize[k] for k in self.lang_list], dtype=float)
         probs = counts / counts.sum()
         # Dampen
         damp = probs ** 0.5
@@ -520,6 +527,9 @@ class BertDatasetLabeled(BertDataset):
         self.neg_buffer_size = 2*len(self)
         self.neg_buffer = self._get_neg_buffer()
         self.neg_buffer_ix = 0
+
+        # Sample a training set
+        self.resample()
         return
 
 
