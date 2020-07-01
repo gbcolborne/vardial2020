@@ -14,6 +14,7 @@ from comp_utils import RELEVANT_LANGS, IRRELEVANT_URALIC_LANGS, ALL_LANGS
 REL_SAMPLE_SIZE = 20000
 CON_SAMPLE_SIZE = 20000
 IRR_SAMPLE_SIZE = 20000
+UNK_SAMPLE_SIZE = 20000
 
 # Label used in BertForLM to indicate a token is not masked.
 NO_MASK_LABEL = -100
@@ -25,6 +26,8 @@ logger = logging.getLogger(__name__)
 
 
 def get_lang_group(lang):
+    if lang == "unk":
+        return "unk"
     assert lang in ALL_LANGS
     if lang in RELEVANT_LANGS:
         return "rel"
@@ -316,46 +319,54 @@ class BertDataset(Dataset):
 
     """ Abstract class, subclassed by BertDatasetLabeled and BertDatasetUnlabeled. These must implement `__getitem__`, as well as `resample`. """
 
-    def __init__(self, train_paths, tokenizer, seq_len, sampling_distro="uniform", encoding="utf-8", seed=None):
+    def __init__(self, train_paths, tokenizer, seq_len, unk_only=False, sampling_distro="uniform", encoding="utf-8", seed=None):
         assert sampling_distro in ["uniform", "relfreq", "dampfreq"]
-        self.train_paths = train_paths # Paths of training files (names must match <lang>.train)
         self.tokenizer = tokenizer
         self.vocab = tokenizer.vocab
+        self.unk_only = unk_only
         self.seq_len = seq_len # Includes CLS and SEP tokens
         self.sampling_distro = sampling_distro
         self.encoding = encoding        
         self.sample_counter = 0  # total number of examples sampled by calling __getitem__ (across all epochs)
         self.total_dataset_size = 0
-        self.sampled_dataset_size = REL_SAMPLE_SIZE + CON_SAMPLE_SIZE + IRR_SAMPLE_SIZE
         self.lang_list = []
-        self.lang2id = {}
+        self.lang2id = {} # Maps to indices in lang_list
         self.lang2path = {}
         self.lang2file = {}
         self.lang2freq = {}
-        self.group2freq = {"rel":0, "con":0, "irr":0}
-        self.lang2ix = {}
+        self.group2freq = {"rel":0, "con":0, "irr":0, "unk":0}
+        self.lang2ix = {} # Maps to the current index in the training file
         self.lang2samplesize = {}
         self.sampled_dataset = None
+        self.sampled_dataset_size = REL_SAMPLE_SIZE + CON_SAMPLE_SIZE + IRR_SAMPLE_SIZE + UNK_SAMPLE_SIZE
         
         if seed:
             random.seed(seed)            
             np.random.seed(seed)
             torch.manual_seed(seed)
-        
-        # Prepare training files to sample lazily from disk
+
+        # Set train_paths
         for path in sorted(train_paths):
-            fn = os.path.split(path)[-1]
-            assert fn[-6:] == ".train"
-            cut = fn.rfind(".")
-            lang = fn[:cut]
-            assert lang in ALL_LANGS
-            self.lang2path[lang] = path
+            filename = os.path.split(path)[-1]
+            assert filename[-6:] == ".train"
+            cut = filename.rfind(".")
+            lang = filename[:cut]
+            assert lang in ALL_LANGS or lang == "unk"
+            if lang == "unk" or not self.unk_only:
+                self.lang2path[lang] = path                            
+        assert len(self.lang2path) > 0
+        if self.unk_only:
+            assert len(self.lang2path) == 1
+            assert 'unk' in self.lang2path
+                
+        # Prepare training files to sample lazily from disk
+        for lang, path in sorted(self.lang2path.items(), key=lambda x:x[0], reverse=False):
             # Open file to load lazily from disk later when we start sampling
-            self.lang2file[lang] = open(path, 'r', encoding=encoding)
+            self.lang2file[lang] = open(self.lang2path[lang], 'r', encoding=self.encoding)
             self.lang2freq[lang] = 0
             self.lang2ix[lang] = 0
             # Count examples
-            with open(path, 'r', encoding=encoding) as f:
+            with open(path, 'r', encoding=self.encoding) as f:
                 logger.info("Processing %s" % path)
                 for line in f:
                     (text, label) = line_to_data(line, False)
@@ -365,8 +376,8 @@ class BertDataset(Dataset):
             # Check which of the 3 groups this lang belongs to
             group = get_lang_group(lang)
             self.group2freq[group] += self.lang2freq[lang]
-        self.lang_list = sorted(lang2freq.keys())
-        self.lang2id = {x:i for i,x in enumerate(lang_list)}
+        self.lang_list = sorted(self.lang2freq.keys())
+        self.lang2id = {x:i for i,x in enumerate(self.lang_list)}
         logger.info("Total dataset size: %d" % self.total_dataset_size)
         logger.info("Sampled dataset size: %d" % self.sampled_dataset_size)
 
@@ -381,6 +392,12 @@ class BertDataset(Dataset):
     
 
     def compute_expected_sample_sizes(self):
+        if self.unk_only:
+            sample_size = REL_SAMPLE_SIZE + CON_SAMPLE_SIZE + IRR_SAMPLE_SIZE + UNK_SAMPLE_SIZE
+            logger.warning("Replaced UNK_SAMPLE_SIZE with sum of all 4 sample sizes")
+            lang2samplesize = {'unk': sample_size}
+            return lang2samplesize
+        
         # Map langs in the 3 groups to IDs
         rel_langs = sorted(RELEVANT_LANGS)
         con_langs = sorted(IRRELEVANT_URALIC_LANGS)
@@ -409,6 +426,15 @@ class BertDataset(Dataset):
         rel_sample_sizes = [int(x) for x in saferound(rel_probs * REL_SAMPLE_SIZE, 0, "largest")]
         con_sample_sizes = [int(x) for x in saferound(con_probs * CON_SAMPLE_SIZE, 0, "largest")]
         irr_sample_sizes = [int(x) for x in saferound(irr_probs * IRR_SAMPLE_SIZE, 0, "largest")]
+        lang2samplesize = {}
+        for i,x in enumerate(rel_sample_sizes):
+            lang2samplesize[rel_langs[i]] = x
+        for i,x in enumerate(con_sample_sizes):
+            lang2samplesize[con_langs[i]] = x
+        for i,x in enumerate(irr_sample_sizes):
+            lang2samplesize[irr_langs[i]] = x
+        if 'unk' in self.lang2path:            
+            lang2samplesize['unk'] = UNK_SAMPLE_SIZE
         logger.info("  # samples (relevant): %d" % sum(rel_sample_sizes))
         logger.info("    Min samples/lang (relevant): %d" % min(rel_sample_sizes))
         logger.info("    Max samples/lang (relevant): %d" % max(rel_sample_sizes))
@@ -418,21 +444,16 @@ class BertDataset(Dataset):
         logger.info("  # samples (irrelevant): %d" % sum(irr_sample_sizes))                
         logger.info("    Min samples/lang (irrelevant): %d" % min(irr_sample_sizes))
         logger.info("    Max samples/lang (irrelevant): %d" % max(irr_sample_sizes))
-        lang2samplesize = {}
-        for i,x in enumerate(rel_sample_sizes):
-            lang2samplesize[rel_langs[i]] = x
-        for i,x in enumerate(con_sample_sizes):
-            lang2samplesize[con_langs[i]] = x
-        for i,x in enumerate(irr_sample_sizes):
-            lang2samplesize[irr_langs[i]] = x
+        if 'unk' in self.lang2path:
+            logger.info("  # samples (unknown): %d" % UNK_SAMPLE_SIZE)            
         return lang2samplesize
 
     
 class BertDatasetUnlabeled(BertDataset):
     
-    def __init__(self, train_paths, tokenizer, seq_len, sampling_distro="uniform", encoding="utf-8", seed=None):
+    def __init__(self, train_paths, tokenizer, seq_len, unk_only=False, sampling_distro="uniform", encoding="utf-8", seed=None):
         # Init parent class
-        super().__init__(train_paths, tokenizer, seq_len, sampling_distro=sampling_distro, encoding=encoding, seed=seed)
+        super().__init__(train_paths, tokenizer, seq_len, unk_only=unk_only, sampling_distro=sampling_distro, encoding=encoding, seed=seed)
 
         # Sample a training set
         self.resample() 
@@ -510,7 +531,7 @@ class BertDatasetLabeled(BertDataset):
         """ Sample language for negative sampling. Return ID of language. """
         sampled_id = self.neg_buffer[self.neg_buffer_ix]
         self.neg_buffer_ix += 1
-        if self.neg_buffer_ix == self.neg_buffer_size
+        if self.neg_buffer_ix == self.neg_buffer_size:
             self.neg_buffer = self._get_neg_buffer()
             self.neg_buffer_ix = 0
         return sampled_id
