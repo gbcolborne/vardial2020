@@ -156,27 +156,33 @@ def convert_unlabeled_example_to_features(example, max_seq_length, tokenizer):
 
     """
     tokens = example.tokens
-
+    
     # Truncate sequence if necessary. Account for [CLS] and [SEP] by subtracting 2.
     tokens = tokens[:max_seq_length-2]
-
+    
     # Mask tokens for MLM
     tokens, lm_label_ids = mask_random_tokens(tokens, tokenizer)
+
+    # Add CLS and SEP
     tokens = ["[CLS]"] + tokens + ["[SEP]"]
     lm_label_ids = [NO_MASK_LABEL] + lm_label_ids + [NO_MASK_LABEL]
-    segment_ids = [0] * len(tokens)
+
+    # Get input token IDs (unpadded)
     input_ids = tokenizer.convert_tokens_to_ids(tokens)
+    
+    # Zero-pad input token IDs
+    input_ids += [0] * (max_seq_length - len(tokens))
+    
+    # Zero-pad labels
+    lm_label_ids += [NO_MASK_LABEL] * (max_seq_length - len(tokens))
 
-    # The mask has 1 for real tokens and 0 for padding tokens. Only real
-    # tokens are attended to.
-    input_mask = [1] * len(input_ids)
+    # Make input mask (1 for real tokens and 0 for padding tokens)
+    input_mask = [1] * len(tokens) + [0] * (max_seq_length - len(tokens))
+    
+    # Make segment IDs (padded)
+    segment_ids = [0] * max_seq_length
 
-    # Zero-pad up to the sequence length.
-    while len(input_ids) < max_seq_length:
-        input_ids.append(0)
-        input_mask.append(0)
-        segment_ids.append(0)
-        lm_label_ids.append(NO_MASK_LABEL)
+    # Check data
     assert len(input_ids) == max_seq_length
     assert len(input_mask) == max_seq_length
     assert len(segment_ids) == max_seq_length
@@ -451,6 +457,7 @@ class BertDatasetUnlabeled(BertDataset):
                 assert text is not None and len(text)
                 data.append(text)
         assert len(data) == self.sampled_dataset_size
+
         # Shuffle
         np.random.shuffle(data)
         self.sampled_dataset = data
@@ -499,9 +506,9 @@ class BertDatasetLabeled(BertDataset):
          return np.random.choice(np.arange(0,len(self.lang_list)), self.neg_buffer_size, replace=True, p=self.neg_sampling_probs)
 
     
-    def _sample_language_for_neg_sampling(self):
+    def _sample_lang_id_for_neg_sampling(self):
         """ Sample language for negative sampling. Return ID of language. """
-        sampled_id = self.neg_buffer[neg_buffer_ix]
+        sampled_id = self.neg_buffer[self.neg_buffer_ix]
         self.neg_buffer_ix += 1
         if self.neg_buffer_ix == self.neg_buffer_size
             self.neg_buffer = self._get_neg_buffer()
@@ -541,27 +548,29 @@ class BertDatasetLabeled(BertDataset):
                 msg += "Increase sample size or use a different sampling_distro."
                 raise RuntimeError(msg)
 
-            # Sample positive candidate from same language
+            # Loop over queries
             for i in range(len(texts)):
-                others = list(range(0,i)) + list(range(i+1,len(texts)))
-                j = random.choice(others)
                 queries.append(texts[i])
-                pos_candidates.append(texts[j])
                 
-            # Sample negative candidate from another language. First
-            # we sample the language, according to their relative
-            # frequency in our sample of texts
-            sampled_lang = None
-            while sampled_lang is None:
-                sampled_id = self._sample_language_for_neg_sampling()
-                if lang_list[sampled_id] != lang:
-                    sampled_lang = lang_list[sampled_id]
-            # Now we sample a text at random
-            neg_candidate = random.choice(lang2texts[sampled_lang])
-            neg_candidates.append(neg_candidate)
+                # Pick a positive candidate (same language)
+                other_indices = list(range(0,i)) + list(range(i+1,len(texts)))
+                pos_ix = random.choice(other_indices)
+                pos_candidates.append(texts[pos_ix])
+                
+                # Sample negative candidate from another language. First
+                # we sample the language, according to their relative
+                # frequency in our sample of texts
+                sampled_lang = None
+                while sampled_lang is None:
+                    sampled_id = self._sample_lang_id_for_neg_sampling()
+                    if self.lang_list[sampled_id] != lang:
+                        sampled_lang = self.lang_list[sampled_id]
+                # Now we sample a text at random
+                neg_candidate = random.choice(lang2texts[sampled_lang])
+                neg_candidates.append(neg_candidate)
         assert len(queries) == len(pos_candidates)
         assert len(queries) == len(neg_candidates)
-        data = zip(queries, pos_candidates, neg_candidates)
+        data = list(zip(queries, pos_candidates, neg_candidates))
         
         # Shuffle
         np.random.shuffle(data)
