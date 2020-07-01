@@ -23,6 +23,7 @@ Code based on: https://github.com/huggingface/pytorch-pretrained-BERT/blob/maste
 
 import os, argparse, logging, pickle, glob, math
 from io import open
+from datetime import datetime
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, RandomSampler
@@ -156,8 +157,6 @@ def main():
     args.train_batch_size = args.train_batch_size // args.gradient_accumulation_steps
     train_paths = glob.glob(os.path.join(args.dir_train_data, "*.train"))
     assert len(train_paths) > 0
-    if os.path.exists(args.output_dir) and os.listdir(args.output_dir):
-        raise ValueError("Output directory ({}) already exists and is not empty.".format(args.output_dir))
     if not os.path.exists(args.output_dir):
         os.makedirs(args.output_dir)
                             
@@ -222,8 +221,9 @@ def main():
     logger.info("# epochs (for %d steps): %d" % (args.num_train_steps, num_epochs))
         
     # Prepare training log
-    output_log_file = os.path.join(args.output_dir, "training_log.txt")
-    with open(output_log_file, "w") as f:
+    time_str = datetime.now().strftime("%Y%m%d%H%M%S")
+    train_log_path = os.path.join(args.output_dir, "%s.train.log" % time_str)
+    with open(train_log_path, "w") as f:
         f.write("Steps\tTrainLoss\n")
     
     # Prepare optimizer
@@ -288,7 +288,7 @@ def main():
         # Update training log
         total_tr_steps += nb_tr_steps
         log_data = [str(total_tr_steps), "{:.5f}".format(avg_loss)]
-        with open(output_log_file, "a") as f:
+        with open(train_log_path, "a") as f:
             f.write("\t".join(log_data)+"\n")
 
         # Save model
