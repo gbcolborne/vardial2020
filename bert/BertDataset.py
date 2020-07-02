@@ -324,7 +324,7 @@ def convert_labeled_example_to_features(example, max_seq_length, tokenizer):
 
 class BertDataset(Dataset):
 
-    """ Abstract class, subclassed by BertDatasetLabeled and BertDatasetUnlabeled. These must implement `__getitem__`, as well as `resample`. """
+    """ Abstract class, subclassed by BertDatasetForSPCAndMLM, BertDatasetForMLM, etc. These must implement `__getitem__`, as well as `resample`. """
 
     def __init__(self, train_paths, tokenizer, seq_len, size, unk_only=False, sampling_distro="uniform", encoding="utf-8", seed=None):
         assert sampling_distro in ["uniform", "relfreq", "dampfreq"]
@@ -454,7 +454,7 @@ class BertDataset(Dataset):
         return lang2samplesize
 
     
-class BertDatasetUnlabeled(BertDataset):
+class BertDatasetForMLM(BertDataset):
     
     def __init__(self, train_paths, tokenizer, seq_len, unk_only=False, sampling_distro="uniform", encoding="utf-8", seed=None):
         # Init parent class
@@ -507,7 +507,7 @@ class BertDatasetUnlabeled(BertDataset):
         return tensors
 
 
-class BertDatasetLabeled(BertDataset):
+class BertDatasetForSPCAndMLM(BertDataset):
     
     def __init__(self, train_paths, tokenizer, seq_len, sampling_distro="uniform", encoding="utf-8", seed=None):
         size = REL_SAMPLE_SIZE + CON_SAMPLE_SIZE + IRR_SAMPLE_SIZE

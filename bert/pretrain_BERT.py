@@ -33,7 +33,7 @@ from transformers import AdamW
 from transformers.optimization import get_linear_schedule_with_warmup
 from tqdm import tqdm, trange
 from CharTokenizer import CharTokenizer
-from BertDataset import BertDatasetUnlabeled, BertDatasetLabeled
+from BertDataset import BertDatasetForMLM, BertDatasetForSPCAndMLM
 
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(name)s -   %(message)s',
@@ -219,37 +219,37 @@ def main():
     if args.mlm_only:
         # We only want to do MLM
         train_dataset_spc = None
-        train_dataset_mlm = BertDatasetUnlabeled(train_paths,
-                                                 tokenizer,
-                                                 unk_only=False,
-                                                 seq_len=max_seq_length,
-                                                 sampling_distro=args.sampling_distro,
-                                                 encoding="utf-8",
-                                                 seed=args.seed)
+        train_dataset_mlm = BertDatasetForMLM(train_paths,
+                                              tokenizer,
+                                              unk_only=False,
+                                              seq_len=max_seq_length,
+                                              sampling_distro=args.sampling_distro,
+                                              encoding="utf-8",
+                                              seed=args.seed)
     else:
         # We want do to SLC and MLM. If unk data is present, we remove
         # it from the paths provided to BertLabeledDataset.
         if path_unk is not None:
             train_paths.remove(path_unk)
-        train_dataset_spc = BertDatasetLabeled(train_paths,
-                                               tokenizer,
-                                               seq_len=max_seq_length,
-                                               sampling_distro=args.sampling_distro,
-                                               encoding="utf-8",
-                                               seed=args.seed)
+        train_dataset_spc = BertDatasetForSPCAndMLM(train_paths,
+                                                    tokenizer,
+                                                    seq_len=max_seq_length,
+                                                    sampling_distro=args.sampling_distro,
+                                                    encoding="utf-8",
+                                                    seed=args.seed)
         if path_unk is None:
             train_dataset_mlm = None
         else:
-            # In this case we use a BertDatasetUnlabeled for the unk
+            # In this case we use a BertDatasetForMLM for the unk
             # data. Both datasets will be of the same size. The latter
             # is used for MLM only.
-            train_dataset_mlm = BertDatasetUnlabeled([path_unk],
-                                                     tokenizer,
-                                                     unk_only=True,
-                                                     seq_len=max_seq_length,
-                                                     sampling_distro=args.sampling_distro,
-                                                     encoding="utf-8",
-                                                     seed=args.seed)
+            train_dataset_mlm = BertDatasetForMLM([path_unk],
+                                                  tokenizer,
+                                                  unk_only=True,
+                                                  seq_len=max_seq_length,
+                                                  sampling_distro=args.sampling_distro,
+                                                  encoding="utf-8",
+                                                  seed=args.seed)
             assert len(train_dataset_spc) == len(train_dataset_mlm)
 
     sys.exit()
