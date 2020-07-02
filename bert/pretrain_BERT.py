@@ -64,6 +64,73 @@ def get_dataloader(dataset, batch_size, local_rank):
     return DataLoader(dataset, sampler=sampler, batch_size=batch_size)
 
 
+def train_mlm(model, tokenizer, optimizer, scheduler, dataset, args, train_log_path):
+    # Write header in log
+    with open(train_log_path, "w") as f:
+        f.write("GlobalStep\tTrainLoss\n")
+        
+    # Start training
+    global_step = 0  # Number of optimization steps (less than number of model calls if we accumulate gradients)
+    logger.info("***** Running training *****")
+    logger.info("  Num examples = %d", len(dataset))
+    logger.info("  Batch size = %d", args.train_batch_size)
+    logger.info("  Num training steps = %d", args.num_train_steps)
+    logger.info("  Num accumulation steps = %d", args.gradient_accumulation_steps)
+    logger.info("  Num optimization steps = %d", args.num_optimization_steps)
+    model.train()
+    for epoch in trange(int(args.num_epochs), desc="Epoch"):
+        # Get fresh training samples
+        if epoch > 0:
+              dataset.resample()
+
+        # Make dataloader
+        dataloader = get_dataloader(dataset, args.train_batch_size, args.local_rank)
+
+        # Some stats for this epoch
+        tr_loss = 0
+        nb_tr_examples = 0
+
+        # Run training for one epoch
+        for step, batch in enumerate(tqdm(dataloader, desc="Iteration")):            
+            batch = tuple(t.to(args.device) for t in batch)
+            input_ids, input_mask, segment_ids, lm_label_ids = batch
+            # Call model. Note: if position_ids is None, they
+            # assume input IDs are in order starting at position 0
+            outputs = model(input_ids=input_ids,
+                            attention_mask=input_mask,
+                            token_type_ids=segment_ids,
+                            lm_labels=lm_label_ids,
+                            position_ids=None)
+            loss = outputs[0]
+            if args.n_gpu > 1:
+                loss = loss.mean() # mean() to average on multi-gpu.
+            if args.gradient_accumulation_steps > 1:
+                loss = loss / args.gradient_accumulation_steps
+            loss.backward()
+            tr_loss += loss.item()
+            nb_tr_examples += input_ids.size(0)
+            if (step + 1) % args.gradient_accumulation_steps == 0:
+                optimizer.step()
+                optimizer.zero_grad()
+                scheduler.step()
+                global_step += 1
+                if global_step >= args.num_optimization_steps:
+                    break
+        avg_loss = tr_loss / nb_tr_examples
+
+        # Update training log
+        log_data = [str(global_step), "{:.5f}".format(avg_loss)]
+        with open(train_log_path, "a") as f:
+            f.write("\t".join(log_data)+"\n")
+
+        # Save model
+        model_to_save = model.module if hasattr(model, 'module') else model  # Only save the model it-self
+        model_to_save.save_pretrained(args.output_dir)
+        fn = os.path.join(args.output_dir, "tokenizer.pkl")
+        with open(fn, "wb") as f:
+            pickle.dump(tokenizer, f)
+
+
 def main():
     parser = argparse.ArgumentParser()
 
@@ -152,28 +219,27 @@ def main():
         
     # What GPUs do we use?
     if args.num_gpus == -1:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        n_gpu = torch.cuda.device_count()
+        args.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        args.n_gpu = torch.cuda.device_count()
         device_ids = None
     else:
-        device = torch.device("cuda" if torch.cuda.is_available() and args.num_gpus > 0 else "cpu")
-        n_gpu = args.num_gpus
-        if n_gpu > 1:
-            device_ids = list(range(n_gpu))
+        args.device = torch.device("cuda" if torch.cuda.is_available() and args.num_gpus > 0 else "cpu")
+        args.n_gpu = args.num_gpus
+        if args.n_gpu > 1:
+            device_ids = list(range(args.n_gpu))
     if args.local_rank != -1:
         torch.cuda.set_device(args.local_rank)
-        device = torch.device("cuda", args.local_rank)
-        n_gpu = 1
+        args.device = torch.device("cuda", args.local_rank)
+        args.n_gpu = 1
         # Initializes the distributed backend which will take care of sychronizing nodes/GPUs
         torch.distributed.init_process_group(backend='nccl')
     logger.info("device: {} n_gpu: {}, distributed training: {}".format(
-        device, n_gpu, bool(args.local_rank != -1)))
+        args.device, args.n_gpu, bool(args.local_rank != -1)))
     
     # Check some other args
     if args.gradient_accumulation_steps < 1:
         raise ValueError("Invalid gradient_accumulation_steps parameter: {}, should be >= 1".format(
                             args.gradient_accumulation_steps))
-    args.train_batch_size = args.train_batch_size // args.gradient_accumulation_steps
     train_paths = glob.glob(os.path.join(args.dir_train_data, "*.train"))
     assert len(train_paths) > 0
     if not os.path.exists(args.output_dir):
@@ -182,7 +248,7 @@ def main():
     # Seed RNGs
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
-    if n_gpu > 0:
+    if args.n_gpu > 0:
         torch.cuda.manual_seed_all(args.seed)
 
     # Load tokenizer
@@ -206,14 +272,14 @@ def main():
         model = BertForMaskedLM.from_pretrained(args.bert_model_or_config_file)
     else:
         model = BertForMaskedLM(config)
-    model.to(device)
+    model.to(args.device)
     if args.local_rank != -1:
         try:
             from apex.parallel import DistributedDataParallel as DDP
         except ImportError:
             raise ImportError("Please install apex from https://www.github.com/nvidia/apex to use distributed training.")
         model = DDP(model)
-    elif n_gpu > 1:
+    elif args.n_gpu > 1:
         model = torch.nn.DataParallel(model, device_ids=device_ids)
     logger.info("Model config: %s" % repr(model.config))
     logger.info("Nb params: %d" % count_params(model))
@@ -259,26 +325,28 @@ def main():
                                                   encoding="utf-8",
                                                   seed=args.seed)
             assert len(train_dataset_spc) == len(train_dataset_mlm)
-    if train_dataset_mlm:
-        num_steps_per_epoch = int(len(train_dataset_mlm) / args.train_batch_size / args.gradient_accumulation_steps)
-        train_dataloader_mlm = get_dataloader(train_dataset_mlm, args.train_batch_size, args.local_rank)
-    if train_dataset_spc:
-        num_steps_per_epoch = int(len(train_dataset_spc) / args.train_batch_size / args.gradient_accumulation_steps)
-        train_dataloader_spc = get_dataloader(train_dataset_spc, args.train_batch_size, args.local_rank)
+
+    # Comput number of optimization steps
+    args.num_optimization_steps = args.num_train_steps // args.gradient_accumulation_steps
+    if train_dataset_mlm is not None:
+        num_opt_steps_per_epoch = int(len(train_dataset_mlm) / args.train_batch_size / args.gradient_accumulation_steps)
+    elif train_dataset_spc is not None:
+        num_opt_steps_per_epoch = int(len(train_dataset_spc) / args.train_batch_size / args.gradient_accumulation_steps)
     if args.local_rank != -1:
-        num_steps_per_epoch = num_steps_per_epoch // torch.distributed.get_world_size()
-    num_epochs = math.ceil(args.num_train_steps / num_steps_per_epoch)
+        num_opt_steps_per_epoch = num_opt_steps_per_epoch // torch.distributed.get_world_size()
+    args.num_epochs = math.ceil(args.num_optimization_steps / num_opt_steps_per_epoch)    
     logger.info("Dataset size: %d" % (len(train_dataset_mlm) if train_dataset_mlm else len(train_dataset_spc)))
-    logger.info("# steps/epoch (with batch size = %d, # accumulation steps = %d): %d" % (args.train_batch_size,
-                                                                                     args.gradient_accumulation_steps,
-                                                                                     num_steps_per_epoch))
-    logger.info("# epochs (for %d steps): %d" % (args.num_train_steps, num_epochs))
-        
+    logger.info("# optimization steps (for %d steps, # accumulation steps = %d): %d" % (args.num_train_steps,
+                                                                                        args.gradient_accumulation_steps,
+                                                                                        args.num_optimization_steps))
+    logger.info("# opt. steps/epoch (with batch size = %d, # accumulation steps = %d): %d" % (args.train_batch_size,
+                                                                                              args.gradient_accumulation_steps,
+                                                                                              num_opt_steps_per_epoch))
+    logger.info("# epochs (for %d steps, %d opt. steps): %d" % (args.num_train_steps, args.num_optimization_steps, args.num_epochs))
+    
     # Prepare training log
     time_str = datetime.now().strftime("%Y%m%d%H%M%S")
     train_log_path = os.path.join(args.output_dir, "%s.train.log" % time_str)
-    with open(train_log_path, "w") as f:
-        f.write("Steps\tTrainLoss\n")
     
     # Prepare optimizer
     param_optimizer = list(model.named_parameters())
@@ -290,67 +358,15 @@ def main():
     optimizer = AdamW(optimizer_grouped_parameters,
                       lr=args.learning_rate,
                       correct_bias=True) # To reproduce BertAdam specific behaviour, use correct_bias=False
-    scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=args.num_warmup_steps, num_training_steps=args.num_train_steps)
+    scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=args.num_warmup_steps, num_training_steps=args.num_optimization_steps)
+
+    # Train
+    if args.mlm_only:
+        train_mlm(model, tokenizer, optimizer, scheduler, train_dataset_mlm, args, train_log_path)
+    else:
+        #train_spc_and_mlm()
+        raise NotImplementedError
     
-    # Start training
-    global_step = 0
-    total_tr_steps = 0
-    logger.info("***** Running training *****")
-    logger.info("  Num examples = %d", (len(train_dataset_mlm) if train_dataset_mlm else len(train_dataset_spc)))
-    logger.info("  Batch size = %d", args.train_batch_size)
-    logger.info("  Num steps = %d", args.num_train_steps)
-    model.train()
-    for epoch in trange(int(num_epochs), desc="Epoch"):
-        # Get fresh training samples
-        if epoch > 0:
-            if train_dataset_mlm:
-                train_dataset_mlm.resample()
-                train_dataloader_mlm = get_dataloader(train_dataset_mlm, args.train_batch_size, args.local_rank)
-            if train_dataset_spc:
-                train_dataset_spc.resample()
-                train_dataloader_spc = get_dataloader(train_dataset_spc, args.train_batch_size, args.local_rank)
-        tr_loss = 0
-        nb_tr_examples, nb_tr_steps = 0, 0
-        for step, batch in enumerate(tqdm(train_dataloader_spc, desc="Iteration")):
-            batch = tuple(t.to(device) for t in batch)
-            input_ids, input_mask, segment_ids, lm_label_ids = batch
-            # Call model. Note: if position_ids is None, they
-            # assume input IDs are in order starting at position 0
-            outputs = model(input_ids=input_ids,
-                            attention_mask=input_mask,
-                            token_type_ids=segment_ids,
-                            lm_labels=lm_label_ids,
-                            position_ids=None)
-            loss = outputs[0]
-            if n_gpu > 1:
-                loss = loss.mean() # mean() to average on multi-gpu.
-            if args.gradient_accumulation_steps > 1:
-                loss = loss / args.gradient_accumulation_steps
-            loss.backward()
-            tr_loss += loss.item()
-            nb_tr_examples += input_ids.size(0)
-            nb_tr_steps += 1
-            if (step + 1) % args.gradient_accumulation_steps == 0:
-                optimizer.step()
-                optimizer.zero_grad()
-                scheduler.step()
-                global_step += 1
-                if global_step >= args.num_train_steps:
-                    break
-        avg_loss = tr_loss / nb_tr_examples
-
-        # Update training log
-        total_tr_steps += nb_tr_steps
-        log_data = [str(total_tr_steps), "{:.5f}".format(avg_loss)]
-        with open(train_log_path, "a") as f:
-            f.write("\t".join(log_data)+"\n")
-
-        # Save model
-        model_to_save = model.module if hasattr(model, 'module') else model  # Only save the model it-self
-        model_to_save.save_pretrained(args.output_dir)
-        fn = os.path.join(args.output_dir, "tokenizer.pkl")
-        with open(fn, "wb") as f:
-            pickle.dump(tokenizer, f)
 
 
 if __name__ == "__main__":
