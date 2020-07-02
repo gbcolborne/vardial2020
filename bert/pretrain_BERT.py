@@ -35,31 +35,12 @@ from transformers.optimization import get_linear_schedule_with_warmup
 from tqdm import tqdm, trange
 from CharTokenizer import CharTokenizer
 from BertDataset import BertDatasetForMLM, BertDatasetForSPCAndMLM
-
+from Pooler import Pooler
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(name)s -   %(message)s',
                     datefmt='%m/%d/%Y %H:%M:%S',
                     level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-
-class Pooler(torch.nn.Module):
-    def __init__(self, hidden_size, cls_only=True):
-        super().__init__()
-        self.dense = torch.nn.Linear(hidden_size, hidden_size)
-        self.activation = torch.nn.Tanh()
-        self.cls_only = cls_only
-        
-    def forward(self, hidden_states):
-        if self.cls_only:
-            # We "pool" the model by simply taking the hidden state corresponding
-            # to the CLS token.
-            pooled = hidden_states[:, 0]
-        else:
-            # We average pool the hidden states
-            pooled = torch.mean(hidden_states, dim=1)
-        output = self.activation(self.dense(pooled))    
-        return output
 
     
 def count_params(model):
@@ -67,6 +48,11 @@ def count_params(model):
     for p in model.parameters():
          count += torch.prod(torch.tensor(p.size())).item()
     return count
+
+
+def accuracy(out, labels):
+    outputs = np.argmax(out, axis=1)
+    return np.sum(outputs == labels)
 
 
 def check_for_unk_train_data(train_paths):
