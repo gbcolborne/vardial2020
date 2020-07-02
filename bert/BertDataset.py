@@ -369,7 +369,7 @@ class BertDatasetForMLM(BertDataset):
 class InputExampleForSPCAndMLM(object):
     """A single training/test example for masked language modeling and sentence pair classification. """
 
-    def __init__(self, guid, tokens, lm_labels=None):
+    def __init__(self, guid, tokens_query, tokens_pos, tokens_neg, lm_labels=None):
         """Constructs a InputExample.
         Args:
             guid: Unique id for the example.
@@ -388,14 +388,14 @@ class InputExampleForSPCAndMLM(object):
 class InputFeaturesForSPCAndMLM(object):
     """A single set of features of data for both masked language modeling and sentence pair classification."""
 
-    def __init__(self, input_ids_query, input_mask_query, segment_ids_query, input_ids_cands, input_mask_cands, segment_ids_cands, cand_labels, lm_label_ids_query):
+    def __init__(self, input_ids_query, input_mask_query, segment_ids_query, input_ids_cands, input_mask_cands, segment_ids_cands, pos_cand_id, lm_label_ids_query):
         self.input_ids_query = input_ids_query # List of query input IDs
         self.input_mask_query = input_mask_query # List containing input mask of query        
         self.segment_ids_query = segment_ids_query # List of query token type (segment) IDs
         self.input_ids_cands = input_ids_cands # List of lists of candidate input IDs
         self.input_mask_cands = input_mask_cands # List of lists containing input mask of candidates
         self.segment_ids_cands = segment_ids_cands # List of lists of candidate token type (segment) IDs
-        self.cand_labels = cand_labels # List of candidate labels (1 for same language, 0 for different language)
+        self.pos_cand_id = pos_cand_id # Integer index of the positive candidate (among the candidates for this example)
         self.lm_label_ids_query = lm_label_ids_query # List containing LM label IDs of query
 
 
@@ -516,7 +516,7 @@ class BertDatasetForSPCAndMLM(BertDataset):
                    torch.tensor(features.input_ids_cands),
                    torch.tensor(features.input_mask_cands),
                    torch.tensor(features.segment_ids_cands),
-                   torch.tensor(features.cand_labels),
+                   torch.tensor(features.pos_cand_id),
                    torch.tensor(features.lm_label_ids_query))
         return tensors
     
@@ -535,7 +535,7 @@ class BertDatasetForSPCAndMLM(BertDataset):
         """
         tokens_query = example.tokens_query
         tokens_pos = example.tokens_pos
-        tokens_neg = example.token_neg
+        tokens_neg = example.tokens_neg
     
         # Truncate sequence if necessary. Account for [CLS] and [SEP] by subtracting 2.
         tokens_query = tokens_query[:max_seq_length-2]
@@ -576,13 +576,13 @@ class BertDatasetForSPCAndMLM(BertDataset):
         # Decide in what order we place the positive and negative examples
         FLIP = random.random() > 0.5
     
-        # Package candidate inputs and masks, and make labels
+        # Package candidate inputs and masks, and make label
         if FLIP:
-            cand_labels = [0,1]
+            pos_cand_id = 1
             input_ids_cands = [input_ids_neg, input_ids_pos]
             input_mask_cands = [input_mask_neg, input_mask_pos]
         else:
-            cand_labels = [1,0]
+            pos_cand_id = 0
             input_ids_cands = [input_ids_pos, input_ids_neg]
             input_mask_cands = [input_mask_pos, input_mask_neg]
     
@@ -599,7 +599,6 @@ class BertDatasetForSPCAndMLM(BertDataset):
         assert len(segment_ids_cands) == 2
         assert len(segment_ids_cands[0]) == max_seq_length
         assert len(segment_ids_cands[1]) == max_seq_length
-        assert len(cand_labels) == 2
         assert len(lm_label_ids_query) == max_seq_length
 
         # Print a few examples.
@@ -615,7 +614,7 @@ class BertDatasetForSPCAndMLM(BertDataset):
             logger.info("input_ids_cands: {}".format(input_ids_cands))
             logger.info("input_mask_cands: {}".format(input_mask_cands))        
             logger.info("segment_ids_cands: {}".format(segment_ids_cands))        
-            logger.info("cand_labels: {}".format(cand_labels))
+            logger.info("pos_cand_id: {}".format(pos_cand_id))
             logger.info("lm_label_ids_query: {}".format(lm_label_ids_query))
 
         features = InputFeaturesForSPCAndMLM(input_ids_query,
@@ -624,7 +623,7 @@ class BertDatasetForSPCAndMLM(BertDataset):
                                              input_ids_cands,
                                              input_mask_cands,
                                              segment_ids_cands,
-                                             cand_labels,
+                                             pos_cand_id,
                                              lm_label_ids_query)
         return features
 

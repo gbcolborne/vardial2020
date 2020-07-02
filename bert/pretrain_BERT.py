@@ -26,6 +26,7 @@ from io import open
 from datetime import datetime
 import numpy as np
 import torch
+from torch.nn import CrossEntropyLoss
 from torch.utils.data import DataLoader, RandomSampler
 from torch.utils.data.distributed import DistributedSampler
 from transformers import BertForMaskedLM, BertConfig, WEIGHTS_NAME, CONFIG_NAME
@@ -64,7 +65,163 @@ def get_dataloader(dataset, batch_size, local_rank):
     return DataLoader(dataset, sampler=sampler, batch_size=batch_size)
 
 
+def train_spc_and_mlm(model, tokenizer, optimizer, scheduler, dataset, args, train_log_path, mlm_dataset=None):
+    """Pretrain a BertModelForMaskedLM using both sentence pair
+    classification and MLM.
+    
+    Args:
+    - model: BertModelForMaskedLM
+    - tokenizer: CharTokenizer
+    - optimizer
+    - scheduler
+    - dataset: BertDatasetForSPCandMLM
+    - args
+    - train_log_path
+    - (Optional) mlm_dataset: a BertDatasetForMLM. If provided, we add
+    a batch from this to every batch of the other dataset. This is
+    useful for pre-training on the unlabeled test data, which we can
+    not use for sentence pair classification.
+
+    """
+    if mlm_dataset is not None:
+        assert len(dataset) == len(mlm_dataset)
+        
+    # Write header in log
+    with open(train_log_path, "w") as f:
+        f.write("GlobalStep\tTrainLoss\n")
+        
+    # Start training
+    global_step = 0  # Number of optimization steps (less than number of model calls if we accumulate gradients)
+    logger.info("***** Running training *****")
+    logger.info("  Num examples = %d", len(dataset))
+    logger.info("  Batch size = %d", args.train_batch_size)
+    logger.info("  Num training steps = %d", args.num_train_steps)
+    logger.info("  Num accumulation steps = %d", args.gradient_accumulation_steps)
+    logger.info("  Num optimization steps = %d", args.num_optimization_steps)
+    model.train()
+    for epoch in trange(int(args.num_epochs), desc="Epoch"):
+        # Get fresh training samples
+        if epoch > 0:
+              dataset.resample()
+              if mlm_dataset is not None:
+                  mlm_dataset.resample()
+                  
+        # Make dataloader
+        dataloader = get_dataloader(dataset, args.train_batch_size, args.local_rank)
+        if mlm_dataset is not None:
+            mlm_dataloader = get_dataloader(mlm_dataset, args.train_batch_size, args.local_rank)
+
+        # Some stats for this epoch
+        tr_loss = 0
+        nb_tr_examples = 0
+
+        # Run training for one epoch
+        for step, batch in enumerate(tqdm(dataloader, desc="Iteration")):            
+            batch = tuple(t.to(args.device) for t in batch)
+            input_ids_query = batch[0]
+            input_mask_query = batch[1]
+            segment_ids_query = batch[2]
+            input_ids_cands = batch[3]
+            input_mask_cands = batch[4]
+            segment_ids_cands = batch[5]
+            cand_labels = batch[6]
+            lm_label_ids = batch[7]
+
+            # Call underlying BERT model to get encodings of query and candidates
+            outputs = model.bert(input_ids=input_ids_query,
+                                 attention_mask=input_mask_query,
+                                 token_type_ids=segment_ids_query,
+                                 position_ids=None)
+            query_last_hidden_states = outputs[0] # Last hidden states, shape (batch_size, seq_len, hidden_size)
+            query_encodings = outputs[1] # Pooler output, shape (batch_size, hidden_size)
+            all_encodings = []
+            for i in range(2):
+                outputs = model.bert(input_ids=input_ids_cands[:,i,:],
+                                     attention_mask=input_mask_cands[:,i,:],
+                                     token_type_ids=segment_ids_cands[:,i,:],
+                                     position_ids=None)
+                encodings = outputs[1] # Pooler output, shape (batch_size, hidden_size)
+                all_encodings.append(encodings.unsqueeze(1))
+            cand_encodings = torch.cat(all_encodings, dim=1)            
+
+            # Do MLM on last hidden states obtained using query
+            # inputs.
+            pred_scores = model.cls(query_last_hidden_states)
+            loss_fct = CrossEntropyLoss()
+            query_mlm_loss = loss_fct(pred_scores.view(-1, model.config.vocab_size), lm_label_ids.view(-1))
+            
+            # Score candidates using dot(query, candidate)
+            scores = torch.bmm(cand_encodings, query_encodings.unsqueeze(2)).squeeze(2)
+
+            # Compute loss
+            spc_loss = loss_fct(scores, cand_labels)
+            
+            # Do MLM on mlm_dataset if provided. First, upack batch
+            extra_mlm_loss = None
+            if mlm_dataset is not None:
+                mlm_batch = next(mlm_dataloader)
+                mlm_batch = tuple(t.to(args.device) for t in batch)
+                xinput_ids, xinput_mask, xsegment_ids, xlm_label_ids = mlm_batch
+                # Make sure the batch sizes are equal
+                assert len(xinput_ids) == len(input_ids_query)
+                outputs = model(input_ids=xinput_ids,
+                                attention_mask=xinput_mask,
+                                token_type_ids=xsegment_ids,
+                                lm_labels=xlm_label_ids,
+                                position_ids=None)
+                extra_mlm_loss = outputs[0]
+                extra_mlm_pred_scores = output[1]
+                
+            # Combine_losses
+            loss = query_mlm_loss + spc_loss
+            if mlm_dataset is not None:
+                loss = loss + extra_mlm_loss
+            if args.n_gpu > 1:
+                loss = loss.mean() # mean() to average on multi-gpu.
+            if args.gradient_accumulation_steps > 1:
+                loss = loss / args.gradient_accumulation_steps
+
+            # Backprop
+            loss.backward()
+            tr_loss += loss.item()
+            nb_tr_examples += input_ids_query.size(0)
+
+            # Check if we accumulate grad or do an optimization step
+            if (step + 1) % args.gradient_accumulation_steps == 0:
+                optimizer.step()
+                optimizer.zero_grad()
+                scheduler.step()
+                global_step += 1
+                if global_step >= args.num_optimization_steps:
+                    break
+        avg_loss = tr_loss / nb_tr_examples
+
+        # Update training log
+        log_data = [str(global_step), "{:.5f}".format(avg_loss)]
+        with open(train_log_path, "a") as f:
+            f.write("\t".join(log_data)+"\n")
+
+        # Save model
+        model_to_save = model.module if hasattr(model, 'module') else model  # Only save the model it-self
+        model_to_save.save_pretrained(args.output_dir)
+        fn = os.path.join(args.output_dir, "tokenizer.pkl")
+        with open(fn, "wb") as f:
+            pickle.dump(tokenizer, f)
+
+            
 def train_mlm(model, tokenizer, optimizer, scheduler, dataset, args, train_log_path):
+    """Pretrain a BertModelForMaskedLM using MLM only.
+    
+    Args:
+    - model: BertModelForMaskedLM
+    - tokenizer: CharTokenizer
+    - optimizer
+    - scheduler
+    - dataset: BertDatasetForMLM
+    - args
+    - train_log_path
+
+    """
     # Write header in log
     with open(train_log_path, "w") as f:
         f.write("GlobalStep\tTrainLoss\n")
@@ -94,6 +251,7 @@ def train_mlm(model, tokenizer, optimizer, scheduler, dataset, args, train_log_p
         for step, batch in enumerate(tqdm(dataloader, desc="Iteration")):            
             batch = tuple(t.to(args.device) for t in batch)
             input_ids, input_mask, segment_ids, lm_label_ids = batch
+            
             # Call model. Note: if position_ids is None, they
             # assume input IDs are in order starting at position 0
             outputs = model(input_ids=input_ids,
@@ -102,6 +260,7 @@ def train_mlm(model, tokenizer, optimizer, scheduler, dataset, args, train_log_p
                             lm_labels=lm_label_ids,
                             position_ids=None)
             loss = outputs[0]
+            pred_scores = output[1]
             if args.n_gpu > 1:
                 loss = loss.mean() # mean() to average on multi-gpu.
             if args.gradient_accumulation_steps > 1:
@@ -364,9 +523,7 @@ def main():
     if args.mlm_only:
         train_mlm(model, tokenizer, optimizer, scheduler, train_dataset_mlm, args, train_log_path)
     else:
-        #train_spc_and_mlm()
-        raise NotImplementedError
-    
+        train_spc_and_mlm(model, tokenizer, optimizer, scheduler, train_dataset_spc, args, train_log_path, mlm_dataset=train_dataset_mlm)
 
 
 if __name__ == "__main__":
