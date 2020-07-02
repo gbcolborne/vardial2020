@@ -42,6 +42,25 @@ logging.basicConfig(format='%(asctime)s - %(levelname)s - %(name)s -   %(message
                     level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+
+class Pooler(torch.nn.Module):
+    def __init__(self, hidden_size, cls_only=True):
+        super().__init__()
+        self.dense = torch.nn.Linear(hidden_size, hidden_size)
+        self.activation = torch.nn.Tanh()
+        self.cls_only = cls_only
+        
+    def forward(self, hidden_states):
+        if self.cls_only:
+            # We "pool" the model by simply taking the hidden state corresponding
+            # to the CLS token.
+            pooled = hidden_states[:, 0]
+        else:
+            # We average pool the hidden states
+            pooled = torch.mean(hidden_states, dim=1)
+        output = self.activation(self.dense(pooled))    
+        return output
+
     
 def count_params(model):
     count = 0
@@ -65,12 +84,13 @@ def get_dataloader(dataset, batch_size, local_rank):
     return DataLoader(dataset, sampler=sampler, batch_size=batch_size)
 
 
-def train_spc_and_mlm(model, tokenizer, optimizer, scheduler, dataset, args, train_log_path, mlm_dataset=None):
+def train_spc_and_mlm(model, pooler, tokenizer, optimizer, scheduler, dataset, args, train_log_path, mlm_dataset=None):
     """Pretrain a BertModelForMaskedLM using both sentence pair
     classification and MLM.
     
     Args:
     - model: BertModelForMaskedLM
+    - pooler: Pooler used for SPC
     - tokenizer: CharTokenizer
     - optimizer
     - scheduler
@@ -133,22 +153,25 @@ def train_spc_and_mlm(model, tokenizer, optimizer, scheduler, dataset, args, tra
                                  token_type_ids=segment_ids_query,
                                  position_ids=None)
             query_last_hidden_states = outputs[0] # Last hidden states, shape (batch_size, seq_len, hidden_size)
-            query_encodings = outputs[1] # Pooler output, shape (batch_size, hidden_size)
-            all_encodings = []
-            for i in range(2):
-                outputs = model.bert(input_ids=input_ids_cands[:,i,:],
-                                     attention_mask=input_mask_cands[:,i,:],
-                                     token_type_ids=segment_ids_cands[:,i,:],
-                                     position_ids=None)
-                encodings = outputs[1] # Pooler output, shape (batch_size, hidden_size)
-                all_encodings.append(encodings.unsqueeze(1))
-            cand_encodings = torch.cat(all_encodings, dim=1)            
 
             # Do MLM on last hidden states obtained using query
             # inputs.
             pred_scores = model.cls(query_last_hidden_states)
             loss_fct = CrossEntropyLoss()
             query_mlm_loss = loss_fct(pred_scores.view(-1, model.config.vocab_size), lm_label_ids.view(-1))
+
+            # Get encodings of query and candidates for SPC
+            query_encodings = pooler(query_last_hidden_states)            
+            all_cand_encodings = []            
+            for i in range(2):
+                outputs = model.bert(input_ids=input_ids_cands[:,i,:],
+                                     attention_mask=input_mask_cands[:,i,:],
+                                     token_type_ids=segment_ids_cands[:,i,:],
+                                     position_ids=None)
+                last_hidden_states = outputs[0]
+                encodings = pooler(last_hidden_states)
+                all_cand_encodings.append(encodings.unsqueeze(1))
+            cand_encodings = torch.cat(all_cand_encodings, dim=1)            
             
             # Score candidates using dot(query, candidate)
             scores = torch.bmm(cand_encodings, query_encodings.unsqueeze(2)).squeeze(2)
@@ -160,7 +183,7 @@ def train_spc_and_mlm(model, tokenizer, optimizer, scheduler, dataset, args, tra
             extra_mlm_loss = None
             if mlm_dataset is not None:
                 mlm_batch = next(mlm_dataloader)
-                mlm_batch = tuple(t.to(args.device) for t in batch)
+                mlm_batch = tuple(t.to(args.device) for t in mlm_batch)
                 xinput_ids, xinput_mask, xsegment_ids, xlm_label_ids = mlm_batch
                 # Make sure the batch sizes are equal
                 assert len(xinput_ids) == len(input_ids_query)
@@ -315,6 +338,10 @@ def main():
                         action="store_true",
                         help=("Use only masked language modeling, no sentence pair classification "
                               " (e.g. if you only have unk.train in your training directory)"))
+    parser.add_argument("--avgpool_for_spc",
+                        action="store_true",
+                        help=("Use average pooling of all last hidden states, rather than just the last hidden state of CLS, to do SPC. "
+                              "Note that in either case, the pooled vector passes through a square linear layer and a tanh before the classification layer."))
     parser.add_argument("--sampling_distro",
                         choices=["uniform", "relfreq", "dampfreq"],
                         default="relfreq",
@@ -338,15 +365,15 @@ def main():
     parser.add_argument("--num_train_steps",
                         default=1000000,
                         type=int,
-                        help="Total number of training steps to perform.")
+                        help="Total number of training steps to perform. Note: # optimization steps = # train steps / # accumulation steps.")
     parser.add_argument("--num_warmup_steps",
                         default=10000,
                         type=int,
-                        help="Number of training steps to perform linear learning rate warmup for. ")
+                        help="Number of optimization steps (i.e. training steps / accumulation steps) to perform linear learning rate warmup for. ")
     parser.add_argument('--gradient_accumulation_steps',
                         type=int,
                         default=1,
-                        help="Number of updates steps to accumualte before performing a backward/update pass.")
+                        help="Number of training steps (i.e. batches) to accumualte before performing a backward/update pass.")
     parser.add_argument("--num_gpus",
                         type=int,
                         default=-1,
@@ -426,22 +453,30 @@ def main():
         logger.info("Size of vocab: {}".format(len(tokenizer.vocab)))
     
             
-    # Prepare model
+    # Prepare model (and pooler if we are doing SPC)
     if pretrained:
         model = BertForMaskedLM.from_pretrained(args.bert_model_or_config_file)
     else:
         model = BertForMaskedLM(config)
     model.to(args.device)
+    if not args.mlm_only:
+        pooler = Pooler(model.config.hidden_size, cls_only=(not args.avgpool_for_spc))
+        pooler.to(args.device)    
     if args.local_rank != -1:
         try:
             from apex.parallel import DistributedDataParallel as DDP
         except ImportError:
             raise ImportError("Please install apex from https://www.github.com/nvidia/apex to use distributed training.")
         model = DDP(model)
+        if not args.mlm_only:
+            pooler = DDP(pooler) 
     elif args.n_gpu > 1:
         model = torch.nn.DataParallel(model, device_ids=device_ids)
+        pooler = torch.nn.DataParallel(pooler, device_ids=device_ids)
     logger.info("Model config: %s" % repr(model.config))
     logger.info("Nb params: %d" % count_params(model))
+    if not args.mlm_only:
+        logger.info("Nb params in pooler: %d" % count_params(pooler))        
 
     # Check if there is unk training data. 
     path_unk = check_for_unk_train_data(train_paths)
@@ -508,22 +543,24 @@ def main():
     train_log_path = os.path.join(args.output_dir, "%s.train.log" % time_str)
     
     # Prepare optimizer
-    param_optimizer = list(model.named_parameters())
+    np_list = list(model.named_parameters())
+    if not args.mlm_only:
+        np_list += list(pooler.named_parameters())
     no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
     optimizer_grouped_parameters = [
-        {'params': [p for n, p in param_optimizer if not any(nd in n for nd in no_decay)], 'weight_decay': 0.01},
-        {'params': [p for n, p in param_optimizer if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
+        {'params': [p for n, p in np_list if not any(nd in n for nd in no_decay)], 'weight_decay': 0.01},
+        {'params': [p for n, p in np_list if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
         ]
     optimizer = AdamW(optimizer_grouped_parameters,
                       lr=args.learning_rate,
                       correct_bias=True) # To reproduce BertAdam specific behaviour, use correct_bias=False
     scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=args.num_warmup_steps, num_training_steps=args.num_optimization_steps)
-
+    
     # Train
     if args.mlm_only:
         train_mlm(model, tokenizer, optimizer, scheduler, train_dataset_mlm, args, train_log_path)
     else:
-        train_spc_and_mlm(model, tokenizer, optimizer, scheduler, train_dataset_spc, args, train_log_path, mlm_dataset=train_dataset_mlm)
+        train_spc_and_mlm(model, pooler, tokenizer, optimizer, scheduler, train_dataset_spc, args, train_log_path, mlm_dataset=train_dataset_mlm)
 
 
 if __name__ == "__main__":
