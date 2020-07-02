@@ -58,64 +58,6 @@ def line_to_data(line, is_labeled):
     return (text, label)
 
 
-class InputExampleUnlabeled(object):
-    """A single training/test example for masked language modeling only."""
-
-    def __init__(self, guid, tokens, lm_labels=None):
-        """Constructs a InputExample.
-        Args:
-            guid: Unique id for the example.
-            tokens: list of strings. The tokens.
-            labels: (Optional) string. The language model labels of the example.
-        """
-        self.guid = guid
-        self.tokens = tokens
-        self.lm_labels = lm_labels 
-
-
-class InputExampleLabeled(object):
-    """A single training/test example for masked language modeling and sentence pair classification. """
-
-    def __init__(self, guid, tokens, lm_labels=None):
-        """Constructs a InputExample.
-        Args:
-            guid: Unique id for the example.
-            tokens_query: list of strings. The tokens of the query (text sample).
-            tokens_pos: list of strings. The tokens of the positive candidate for this query (from same language).
-            tokens_neg: list of strings. The tokens of the negative candidate for this query (from other language).
-            lm_labels: (Optional) string. The language model labels of the example.
-        """
-        self.guid = guid
-        self.tokens_query = tokens_query
-        self.tokens_pos = tokens_pos
-        self.tokens_neg = tokens_neg
-        self.lm_labels = lm_labels 
-        
-
-class InputFeaturesUnlabeled(object):
-    """A single set of features of data for masked language modeling only."""
-
-    def __init__(self, input_ids, input_mask, segment_ids, lm_label_ids):
-        self.input_ids = input_ids # List input token IDs
-        self.input_mask = input_mask # List containing input mask 
-        self.segment_ids = segment_ids # List containing input mask 
-        self.lm_label_ids = lm_label_ids # List containing LM label IDs 
-
-
-class InputFeaturesLabeled(object):
-    """A single set of features of data for both masked language modeling and sentence pair classification."""
-
-    def __init__(self, input_ids_query, input_mask_query, segment_ids_query, input_ids_cands, input_mask_cands, segment_ids_cands, cand_labels, lm_label_ids_query):
-        self.input_ids_query = input_ids_query # List of query input IDs
-        self.input_mask_query = input_mask_query # List containing input mask of query        
-        self.segment_ids_query = segment_ids_query # List of query token type (segment) IDs
-        self.input_ids_cands = input_ids_cands # List of lists of candidate input IDs
-        self.input_mask_cands = input_mask_cands # List of lists containing input mask of candidates
-        self.segment_ids_cands = segment_ids_cands # List of lists of candidate token type (segment) IDs
-        self.cand_labels = cand_labels # List of candidate labels (1 for same language, 0 for different language)
-        self.lm_label_ids_query = lm_label_ids_query # List containing LM label IDs of query
-
-
 def mask_random_tokens(tokens, tokenizer):
     """
     Masking some random tokens for masked language modeling with probabilities as in the original BERT paper.
@@ -152,174 +94,6 @@ def mask_random_tokens(tokens, tokenizer):
             output_label.append(NO_MASK_LABEL)
 
     return tokens, output_label
-
-
-def convert_unlabeled_example_to_features(example, max_seq_length, tokenizer):
-    """Convert a raw sample (a sentence as tokenized strings) into a
-    proper training sample for MLM only, with IDs, LM labels,
-    input_mask, CLS and SEP tokens etc.
-
-    :param example: InputExampleUnlabeled, containing sentence input as lists of tokens.
-    :param max_seq_length: int, maximum length of sequence.
-    :param tokenizer: Tokenizer
-    :return: InputFeaturesUnlabeled, containing all inputs and labels of one sample as IDs (as used for model training)
-
-    """
-    tokens = example.tokens
-    
-    # Truncate sequence if necessary. Account for [CLS] and [SEP] by subtracting 2.
-    tokens = tokens[:max_seq_length-2]
-    
-    # Mask tokens for MLM
-    tokens, lm_label_ids = mask_random_tokens(tokens, tokenizer)
-
-    # Add CLS and SEP
-    tokens = ["[CLS]"] + tokens + ["[SEP]"]
-    lm_label_ids = [NO_MASK_LABEL] + lm_label_ids + [NO_MASK_LABEL]
-
-    # Get input token IDs (unpadded)
-    input_ids = tokenizer.convert_tokens_to_ids(tokens)
-    
-    # Zero-pad input token IDs
-    input_ids += [0] * (max_seq_length - len(tokens))
-    
-    # Zero-pad labels
-    lm_label_ids += [NO_MASK_LABEL] * (max_seq_length - len(tokens))
-
-    # Make input mask (1 for real tokens and 0 for padding tokens)
-    input_mask = [1] * len(tokens) + [0] * (max_seq_length - len(tokens))
-    
-    # Make segment IDs (padded)
-    segment_ids = [0] * max_seq_length
-
-    # Check data
-    assert len(input_ids) == max_seq_length
-    assert len(input_mask) == max_seq_length
-    assert len(segment_ids) == max_seq_length
-    assert len(lm_label_ids) == max_seq_length
-
-    if example.guid < 5:
-        logger.info("*** Example ***")
-        logger.info("guid: {}".format(example.guid))
-        logger.info("tokens: {}".format(tokens))
-        logger.info("input_ids: {}".format(input_ids))
-        logger.info("input_mask: {}".format(input_mask))
-        logger.info("segment_ids: {}".format(segment_ids))
-        logger.info("lm_label_ids: {}".format(lm_label_ids))
-
-    features = InputFeaturesUnlabeled(input_ids=input_ids,
-                                      input_mask=input_mask,
-                                      segment_ids=segment_ids,
-                                      lm_label_ids=lm_label_ids)
-    return features
-
-
-def convert_labeled_example_to_features(example, max_seq_length, tokenizer):
-    """Convert a raw sample (a sentence as tokenized strings) into a
-    proper training sample for both MLM and SPC, with IDs, LM labels,
-    input_mask, candidate labels for sentence pair classification, CLS
-    and SEP tokens, etc.
-
-    :param example: InputExampleLabeled, containing sentence inputs as lists of tokens.
-    :param max_seq_length: int, maximum length of sequence.
-    :param tokenizer: Tokenizer
-    :return: InputFeaturesLabeled, containing all inputs and labels of one sample as IDs (as used for model training)
-
-    """
-    tokens_query = example.tokens_query
-    tokens_pos = example.tokens_pos
-    tokens_neg = example.token_neg
-    
-    # Truncate sequence if necessary. Account for [CLS] and [SEP] by subtracting 2.
-    tokens_query = tokens_query[:max_seq_length-2]
-    tokens_pos = tokens_pos[:max_seq_length-2]
-    tokens_neg = tokens_neg[:max_seq_length-2]    
-    
-    # Mask tokens for MLM
-    tokens_query, lm_label_ids_query = mask_random_tokens(tokens_query, tokenizer)
-
-    # Add CLS and SEP
-    tokens_query = ["[CLS]"] + tokens_query + ["[SEP]"]
-    tokens_pos = ["[CLS]"] + tokens_pos + ["[SEP]"]
-    tokens_neg = ["[CLS]"] + tokens_neg + ["[SEP]"]
-    lm_label_ids_query = [NO_MASK_LABEL] + lm_label_ids_query + [NO_MASK_LABEL]
-
-    # Get input token IDs (unpadded)
-    input_ids_query = tokenizer.convert_tokens_to_ids(tokens_query)
-    input_ids_pos = tokenizer.convert_tokens_to_ids(tokens_pos)
-    input_ids_neg = tokenizer.convert_tokens_to_ids(tokens_neg)
-    
-    # Zero-pad input token IDs
-    input_ids_query += [0] * (max_seq_length - len(tokens_query))
-    input_ids_pos += [0] * (max_seq_length - len(tokens_pos))
-    input_ids_neg += [0] * (max_seq_length - len(tokens_neg))    
-    
-    # Zero-pad labels
-    lm_label_ids_query += [NO_MASK_LABEL] * (max_seq_length - len(tokens_query))
-
-    # Make input mask (1 for real tokens and 0 for padding tokens)
-    input_mask_query = [1] * len(tokens_query) + [0] * (max_seq_length - len(tokens_query))
-    input_mask_pos = [1] * len(tokens_pos) + [0] * (max_seq_length - len(tokens_pos))
-    input_mask_neg = [1] * len(tokens_neg) + [0] * (max_seq_length - len(tokens_neg))                                                          
-    
-    # Make segment IDs (padded)
-    segment_ids_query = [0] * max_seq_length
-    segment_ids_cands = [[0] * max_seq_length, [0] * max_seq_length]
-    
-    # Decide in what order we place the positive and negative examples
-    FLIP = random.random() > 0.5
-    
-    # Package candidate inputs and masks, and make labels
-    if FLIP:
-        cand_labels = [0,1]
-        input_ids_cands = [input_ids_neg, input_ids_pos]
-        input_mask_cands = [input_mask_neg, input_mask_pos]
-    else:
-        cand_labels = [1,0]
-        input_ids_cands = [input_ids_pos, input_ids_neg]
-        input_mask_cands = [input_mask_pos, input_mask_neg]
-    
-    # Check data
-    assert len(input_ids_query) == max_seq_length
-    assert len(input_ids_cands) == 2
-    assert len(input_ids_cands[0]) == max_seq_length
-    assert len(input_ids_cands[1]) == max_seq_length
-    assert len(input_mask_query) == max_seq_length
-    assert len(input_mask_cands) == 2
-    assert len(input_mask_cands[0]) == max_seq_length
-    assert len(input_mask_cands[1]) == max_seq_length
-    assert len(segment_ids_query) == max_seq_length
-    assert len(segment_ids_cands) == 2
-    assert len(segment_ids_cands[0]) == max_seq_length
-    assert len(segment_ids_cands[1]) == max_seq_length
-    assert len(cand_labels) == 2
-    assert len(lm_label_ids_query) == max_seq_length
-
-    # Print a few examples.
-    if example.guid < 5:
-        logger.info("*** Example ***")
-        logger.info("guid: {}".format(example.guid))
-        logger.info("tokens_query: {}".format(tokens_query))
-        logger.info("input_ids_query: {}".format(input_ids_query))
-        logger.info("input_mask_query: {}".format(input_mask_query))
-        logger.info("segment_ids_query: {}".format(segment_ids_query))        
-        logger.info("tokens_pos: {}".format(tokens_pos))
-        logger.info("tokens_neg: {}".format(tokens_neg))        
-        logger.info("input_ids_cands: {}".format(input_ids_cands))
-        logger.info("input_mask_cands: {}".format(input_mask_cands))        
-        logger.info("segment_ids_cands: {}".format(segment_ids_cands))        
-        logger.info("cand_labels: {}".format(cand_labels))
-        logger.info("lm_label_ids_query: {}".format(lm_label_ids_query))
-
-    features = InputFeaturesLabeled(input_ids_query,
-                                    input_mask_query,
-                                    segment_ids_query,
-                                    input_ids_cands,
-                                    input_mask_cands,
-                                    segment_ids_cands,
-                                    cand_labels,
-                                    lm_label_ids_query)
-    return features
 
 
 class BertDataset(Dataset):
@@ -454,6 +228,31 @@ class BertDataset(Dataset):
         return lang2samplesize
 
     
+class InputExampleForMLM(object):
+    """A single training/test example for masked language modeling only."""
+
+    def __init__(self, guid, tokens, lm_labels=None):
+        """Constructs a InputExample.
+        Args:
+            guid: Unique id for the example.
+            tokens: list of strings. The tokens.
+            labels: (Optional) string. The language model labels of the example.
+        """
+        self.guid = guid
+        self.tokens = tokens
+        self.lm_labels = lm_labels 
+        
+
+class InputFeaturesForMLM(object):
+    """A single set of features of data for masked language modeling only."""
+
+    def __init__(self, input_ids, input_mask, segment_ids, lm_label_ids):
+        self.input_ids = input_ids # List input token IDs
+        self.input_mask = input_mask # List containing input mask 
+        self.segment_ids = segment_ids # List containing input mask 
+        self.lm_label_ids = lm_label_ids # List containing LM label IDs 
+    
+    
 class BertDatasetForMLM(BertDataset):
     
     def __init__(self, train_paths, tokenizer, seq_len, unk_only=False, sampling_distro="uniform", encoding="utf-8", seed=None):
@@ -498,13 +297,106 @@ class BertDatasetForMLM(BertDataset):
         example_id = self.sample_counter
         self.sample_counter += 1
         tokens = self.tokenizer.tokenize(t)
-        example = InputExampleUnlabeled(guid=example_id, tokens=tokens)
-        features = convert_unlabeled_example_to_features(example, self.seq_len, self.tokenizer)
+        example = InputExampleForMLM(guid=example_id, tokens=tokens)
+        features = self._convert_example_to_features(example, self.seq_len, self.tokenizer)
         tensors = (torch.tensor(features.input_ids),
                    torch.tensor(features.input_mask),
                    torch.tensor(features.segment_ids),
                    torch.tensor(features.lm_label_ids))
         return tensors
+
+    
+    def _convert_example_to_features(self, example, max_seq_length, tokenizer):
+        """Convert a raw sample (a sentence as tokenized strings) into a
+        proper training sample for MLM only, with IDs, LM labels,
+        input_mask, CLS and SEP tokens etc.
+        
+        :param example: InputExampleForMLM, containing sentence input as lists of tokens.
+        :param max_seq_length: int, maximum length of sequence.
+        :param tokenizer: Tokenizer
+        :return: InputFeaturesForMLM, containing all inputs and labels of one sample as IDs (as used for model training)
+
+        """
+        tokens = example.tokens
+        
+        # Truncate sequence if necessary. Account for [CLS] and [SEP] by subtracting 2.
+        tokens = tokens[:max_seq_length-2]
+        
+        # Mask tokens for MLM
+        tokens, lm_label_ids = mask_random_tokens(tokens, tokenizer)
+
+        # Add CLS and SEP
+        tokens = ["[CLS]"] + tokens + ["[SEP]"]
+        lm_label_ids = [NO_MASK_LABEL] + lm_label_ids + [NO_MASK_LABEL]
+        
+        # Get input token IDs (unpadded)
+        input_ids = tokenizer.convert_tokens_to_ids(tokens)
+    
+        # Zero-pad input token IDs
+        input_ids += [0] * (max_seq_length - len(tokens))
+    
+        # Zero-pad labels
+        lm_label_ids += [NO_MASK_LABEL] * (max_seq_length - len(tokens))
+
+        # Make input mask (1 for real tokens and 0 for padding tokens)
+        input_mask = [1] * len(tokens) + [0] * (max_seq_length - len(tokens))
+    
+        # Make segment IDs (padded)
+        segment_ids = [0] * max_seq_length
+
+        # Check data
+        assert len(input_ids) == max_seq_length
+        assert len(input_mask) == max_seq_length
+        assert len(segment_ids) == max_seq_length
+        assert len(lm_label_ids) == max_seq_length
+        
+        if example.guid < 5:
+            logger.info("*** Example ***")
+            logger.info("guid: {}".format(example.guid))
+            logger.info("tokens: {}".format(tokens))
+            logger.info("input_ids: {}".format(input_ids))
+            logger.info("input_mask: {}".format(input_mask))
+            logger.info("segment_ids: {}".format(segment_ids))
+            logger.info("lm_label_ids: {}".format(lm_label_ids))
+
+        features = InputFeaturesForMLM(input_ids=input_ids,
+                                       input_mask=input_mask,
+                                       segment_ids=segment_ids,
+                                       lm_label_ids=lm_label_ids)
+        return features
+
+    
+class InputExampleForSPCAndMLM(object):
+    """A single training/test example for masked language modeling and sentence pair classification. """
+
+    def __init__(self, guid, tokens, lm_labels=None):
+        """Constructs a InputExample.
+        Args:
+            guid: Unique id for the example.
+            tokens_query: list of strings. The tokens of the query (text sample).
+            tokens_pos: list of strings. The tokens of the positive candidate for this query (from same language).
+            tokens_neg: list of strings. The tokens of the negative candidate for this query (from other language).
+            lm_labels: (Optional) string. The language model labels of the example.
+        """
+        self.guid = guid
+        self.tokens_query = tokens_query
+        self.tokens_pos = tokens_pos
+        self.tokens_neg = tokens_neg
+        self.lm_labels = lm_labels 
+
+        
+class InputFeaturesForSPCAndMLM(object):
+    """A single set of features of data for both masked language modeling and sentence pair classification."""
+
+    def __init__(self, input_ids_query, input_mask_query, segment_ids_query, input_ids_cands, input_mask_cands, segment_ids_cands, cand_labels, lm_label_ids_query):
+        self.input_ids_query = input_ids_query # List of query input IDs
+        self.input_mask_query = input_mask_query # List containing input mask of query        
+        self.segment_ids_query = segment_ids_query # List of query token type (segment) IDs
+        self.input_ids_cands = input_ids_cands # List of lists of candidate input IDs
+        self.input_mask_cands = input_mask_cands # List of lists containing input mask of candidates
+        self.segment_ids_cands = segment_ids_cands # List of lists of candidate token type (segment) IDs
+        self.cand_labels = cand_labels # List of candidate labels (1 for same language, 0 for different language)
+        self.lm_label_ids_query = lm_label_ids_query # List containing LM label IDs of query
 
 
 class BertDatasetForSPCAndMLM(BertDataset):
@@ -616,8 +508,8 @@ class BertDatasetForSPCAndMLM(BertDataset):
         tokens_query = self.tokenizer.tokenize(q)
         tokens_pos = self.tokenizer.tokenize(p)
         tokens_neg = self.tokenizer.tokenize(n)        
-        example = InputExampleLabeled(guid=example_id, tokens_query=tokens_query, tokens_pos=tokens_pos, tokens_neg=tokens_neg)
-        features = convert_labeled_example_to_features(example, self.seq_len, self.tokenizer)
+        example = InputExampleForSPCAndMLM(guid=example_id, tokens_query=tokens_query, tokens_pos=tokens_pos, tokens_neg=tokens_neg)
+        features = self._convert_example_to_features(example, self.seq_len, self.tokenizer)
         tensors = (torch.tensor(features.input_ids_query),
                    torch.tensor(features.input_mask_query),
                    torch.tensor(features.segment_ids_query),
@@ -629,4 +521,113 @@ class BertDatasetForSPCAndMLM(BertDataset):
         return tensors
     
 
+    def _convert_example_to_features(self, example, max_seq_length, tokenizer):
+        """Convert a raw sample (a sentence as tokenized strings) into a
+        proper training sample for both MLM and SPC, with IDs, LM labels,
+        input_mask, candidate labels for sentence pair classification, CLS
+        and SEP tokens, etc.
+
+        :param example: InputExampleForSPCAndMLM, containing sentence inputs as lists of tokens.
+        :param max_seq_length: int, maximum length of sequence.
+        :param tokenizer: Tokenizer
+        :return: InputFeaturesForSPCAndMLM, containing all inputs and labels of one sample as IDs (as used for model training)
+
+        """
+        tokens_query = example.tokens_query
+        tokens_pos = example.tokens_pos
+        tokens_neg = example.token_neg
+    
+        # Truncate sequence if necessary. Account for [CLS] and [SEP] by subtracting 2.
+        tokens_query = tokens_query[:max_seq_length-2]
+        tokens_pos = tokens_pos[:max_seq_length-2]
+        tokens_neg = tokens_neg[:max_seq_length-2]    
+    
+        # Mask tokens for MLM
+        tokens_query, lm_label_ids_query = mask_random_tokens(tokens_query, tokenizer)
+
+        # Add CLS and SEP
+        tokens_query = ["[CLS]"] + tokens_query + ["[SEP]"]
+        tokens_pos = ["[CLS]"] + tokens_pos + ["[SEP]"]
+        tokens_neg = ["[CLS]"] + tokens_neg + ["[SEP]"]
+        lm_label_ids_query = [NO_MASK_LABEL] + lm_label_ids_query + [NO_MASK_LABEL]
+
+        # Get input token IDs (unpadded)
+        input_ids_query = tokenizer.convert_tokens_to_ids(tokens_query)
+        input_ids_pos = tokenizer.convert_tokens_to_ids(tokens_pos)
+        input_ids_neg = tokenizer.convert_tokens_to_ids(tokens_neg)
+    
+        # Zero-pad input token IDs
+        input_ids_query += [0] * (max_seq_length - len(tokens_query))
+        input_ids_pos += [0] * (max_seq_length - len(tokens_pos))
+        input_ids_neg += [0] * (max_seq_length - len(tokens_neg))    
+    
+        # Zero-pad labels
+        lm_label_ids_query += [NO_MASK_LABEL] * (max_seq_length - len(tokens_query))
+
+        # Make input mask (1 for real tokens and 0 for padding tokens)
+        input_mask_query = [1] * len(tokens_query) + [0] * (max_seq_length - len(tokens_query))
+        input_mask_pos = [1] * len(tokens_pos) + [0] * (max_seq_length - len(tokens_pos))
+        input_mask_neg = [1] * len(tokens_neg) + [0] * (max_seq_length - len(tokens_neg))                                                          
+    
+        # Make segment IDs (padded)
+        segment_ids_query = [0] * max_seq_length
+        segment_ids_cands = [[0] * max_seq_length, [0] * max_seq_length]
+    
+        # Decide in what order we place the positive and negative examples
+        FLIP = random.random() > 0.5
+    
+        # Package candidate inputs and masks, and make labels
+        if FLIP:
+            cand_labels = [0,1]
+            input_ids_cands = [input_ids_neg, input_ids_pos]
+            input_mask_cands = [input_mask_neg, input_mask_pos]
+        else:
+            cand_labels = [1,0]
+            input_ids_cands = [input_ids_pos, input_ids_neg]
+            input_mask_cands = [input_mask_pos, input_mask_neg]
+    
+        # Check data
+        assert len(input_ids_query) == max_seq_length
+        assert len(input_ids_cands) == 2
+        assert len(input_ids_cands[0]) == max_seq_length
+        assert len(input_ids_cands[1]) == max_seq_length
+        assert len(input_mask_query) == max_seq_length
+        assert len(input_mask_cands) == 2
+        assert len(input_mask_cands[0]) == max_seq_length
+        assert len(input_mask_cands[1]) == max_seq_length
+        assert len(segment_ids_query) == max_seq_length
+        assert len(segment_ids_cands) == 2
+        assert len(segment_ids_cands[0]) == max_seq_length
+        assert len(segment_ids_cands[1]) == max_seq_length
+        assert len(cand_labels) == 2
+        assert len(lm_label_ids_query) == max_seq_length
+
+        # Print a few examples.
+        if example.guid < 5:
+            logger.info("*** Example ***")
+            logger.info("guid: {}".format(example.guid))
+            logger.info("tokens_query: {}".format(tokens_query))
+            logger.info("input_ids_query: {}".format(input_ids_query))
+            logger.info("input_mask_query: {}".format(input_mask_query))
+            logger.info("segment_ids_query: {}".format(segment_ids_query))        
+            logger.info("tokens_pos: {}".format(tokens_pos))
+            logger.info("tokens_neg: {}".format(tokens_neg))        
+            logger.info("input_ids_cands: {}".format(input_ids_cands))
+            logger.info("input_mask_cands: {}".format(input_mask_cands))        
+            logger.info("segment_ids_cands: {}".format(segment_ids_cands))        
+            logger.info("cand_labels: {}".format(cand_labels))
+            logger.info("lm_label_ids_query: {}".format(lm_label_ids_query))
+
+        features = InputFeaturesForSPCAndMLM(input_ids_query,
+                                             input_mask_query,
+                                             segment_ids_query,
+                                             input_ids_cands,
+                                             input_mask_cands,
+                                             segment_ids_cands,
+                                             cand_labels,
+                                             lm_label_ids_query)
+        return features
+
+
+    
 
