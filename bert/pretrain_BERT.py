@@ -56,6 +56,14 @@ def check_for_unk_train_data(train_paths):
     return None
 
 
+def get_dataloader(dataset, batch_size, local_rank):
+    if local_rank == -1:
+        sampler = RandomSampler(dataset)
+    else:
+        sampler = DistributedSampler(dataset)
+    return DataLoader(dataset, sampler=sampler, batch_size=batch_size)
+
+
 def main():
     parser = argparse.ArgumentParser()
 
@@ -251,21 +259,16 @@ def main():
                                                   encoding="utf-8",
                                                   seed=args.seed)
             assert len(train_dataset_spc) == len(train_dataset_mlm)
-
-    sys.exit()
-    #### TODO: Adapt samplers and dataloaders to be dual like the train dataset: mlm and spc
-        
-    if args.local_rank == -1:
-        train_sampler = RandomSampler(train_dataset)
-    else:
-        train_sampler = DistributedSampler(train_dataset)
-    train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.train_batch_size)
-
-    num_steps_per_epoch = int(len(train_dataset) / args.train_batch_size / args.gradient_accumulation_steps) 
+    if train_dataset_mlm:
+        num_steps_per_epoch = int(len(train_dataset_mlm) / args.train_batch_size / args.gradient_accumulation_steps)
+        train_dataloader_mlm = get_dataloader(train_dataset_mlm, args.train_batch_size, args.local_rank)
+    if train_dataset_spc:
+        num_steps_per_epoch = int(len(train_dataset_spc) / args.train_batch_size / args.gradient_accumulation_steps)
+        train_dataloader_spc = get_dataloader(train_dataset_spc, args.train_batch_size, args.local_rank)
     if args.local_rank != -1:
         num_steps_per_epoch = num_steps_per_epoch // torch.distributed.get_world_size()
     num_epochs = math.ceil(args.num_train_steps / num_steps_per_epoch)
-    logger.info("Dataset size: %d" % len(train_dataset))
+    logger.info("Dataset size: %d" % (len(train_dataset_mlm) if train_dataset_mlm else len(train_dataset_spc)))
     logger.info("# steps/epoch (with batch size = %d, # accumulation steps = %d): %d" % (args.train_batch_size,
                                                                                      args.gradient_accumulation_steps,
                                                                                      num_steps_per_epoch))
@@ -293,22 +296,22 @@ def main():
     global_step = 0
     total_tr_steps = 0
     logger.info("***** Running training *****")
-    logger.info("  Num examples = %d", len(train_dataset))
+    logger.info("  Num examples = %d", (len(train_dataset_mlm) if train_dataset_mlm else len(train_dataset_spc)))
     logger.info("  Batch size = %d", args.train_batch_size)
     logger.info("  Num steps = %d", args.num_train_steps)
     model.train()
     for epoch in trange(int(num_epochs), desc="Epoch"):
         # Get fresh training samples
         if epoch > 0:
-            train_dataset.resample()
-            if args.local_rank == -1:
-                train_sampler = RandomSampler(train_dataset)
-            else:
-                train_sampler = DistributedSampler(train_dataset)
-            train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.train_batch_size)
+            if train_dataset_mlm:
+                train_dataset_mlm.resample()
+                train_dataloader_mlm = get_dataloader(train_dataset_mlm, args.train_batch_size, args.local_rank)
+            if train_dataset_spc:
+                train_dataset_spc.resample()
+                train_dataloader_spc = get_dataloader(train_dataset_spc, args.train_batch_size, args.local_rank)
         tr_loss = 0
         nb_tr_examples, nb_tr_steps = 0, 0
-        for step, batch in enumerate(tqdm(train_dataloader, desc="Iteration")):
+        for step, batch in enumerate(tqdm(train_dataloader_spc, desc="Iteration")):
             batch = tuple(t.to(device) for t in batch)
             input_ids, input_mask, segment_ids, lm_label_ids = batch
             # Call model. Note: if position_ids is None, they
