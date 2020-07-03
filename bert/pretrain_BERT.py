@@ -263,23 +263,20 @@ def train_spc_and_mlm(model, pooler, tokenizer, optimizer, scheduler, dataset, a
         if mlm_dataset is not None:
             log_data.append("{:.5f}".format(avg_extra_mlm_loss))
             log_data.append("{:.5f}".format(avg_extra_mlm_acc))        
-        
         with open(train_log_path, "a") as f:
             f.write("\t".join(log_data)+"\n")
 
-        # Save model at end of each epoch
-        model_to_save = model.module if hasattr(model, 'module') else model  # Only save the model it-self
-        model_to_save.save_pretrained(args.output_dir)
-
-        # Save state dict of pooler
-        fn = os.path.join(args.output_dir, "pooler.pt")
-        torch.save(pooler.state_dict(), fn)
-
-        # Save tokenizer
-        fn = os.path.join(args.output_dir, "tokenizer.pkl")
-        with open(fn, "wb") as f:
-            pickle.dump(tokenizer, f)
-
+        # Save checkpoint
+        model_to_save = model.module if hasattr(model, 'module') else model
+        pooler_to_save = pooler.module if hasattr(pooler, 'module') else pooler
+        checkpoint_data = {}
+        checkpoint_data['global_step'] = global_step
+        checkpoint_data['model_state_dict'] = model_to_save.state_dict()
+        checkpoint_data['pooler_state_dict'] = pooler_to_save.state_dict()
+        checkpoint_data['optimizer_state_dict'] = optimizer.state_dict()        
+        checkpoint_data['scheduler_state_dict'] = scheduler.state_dict()
+        checkpoint_path = os.path.join(args.output_dir, "checkpoint.tar")
+        torch.save(checkpoint_data, checkpoint_path)
             
 def train_mlm(model, tokenizer, optimizer, scheduler, dataset, args, train_log_path):
     """Pretrain a BertModelForMaskedLM using MLM only.
@@ -362,12 +359,15 @@ def train_mlm(model, tokenizer, optimizer, scheduler, dataset, args, train_log_p
         with open(train_log_path, "a") as f:
             f.write("\t".join(log_data)+"\n")
 
-        # Save model
-        model_to_save = model.module if hasattr(model, 'module') else model  # Only save the model it-self
-        model_to_save.save_pretrained(args.output_dir)
-        fn = os.path.join(args.output_dir, "tokenizer.pkl")
-        with open(fn, "wb") as f:
-            pickle.dump(tokenizer, f)
+        # Save checkpoint
+        model_to_save = model.module if hasattr(model, 'module') else model
+        checkpoint_data = {}
+        checkpoint_data['global_step'] = global_step
+        checkpoint_data['model_state_dict'] = model_to_save.state_dict()
+        checkpoint_data['optimizer_state_dict'] = optimizer.state_dict()        
+        checkpoint_data['scheduler_state_dict'] = scheduler.state_dict()
+        checkpoint_path = os.path.join(args.output_dir, "checkpoint.tar")
+        torch.save(checkpoint_data, checkpoint_path)
 
 
 def main():
@@ -509,6 +509,10 @@ def main():
         config.vocab_size = len(tokenizer.vocab)
         logger.info("Size of vocab: {}".format(len(tokenizer.vocab)))
     
+    # Save tokenizer
+    fn = os.path.join(args.output_dir, "tokenizer.pkl")
+    with open(fn, "wb") as f:
+        pickle.dump(tokenizer, f)
             
     # Prepare model (and pooler if we are doing SPC)
     if pretrained:
