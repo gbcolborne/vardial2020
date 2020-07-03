@@ -163,7 +163,7 @@ def train_spc_and_mlm(model, pooler, tokenizer, optimizer, scheduler, dataset, a
             cand_labels = batch[6]
             lm_label_ids = batch[7]
             real_batch_sizes.append(len(input_ids_query))
-            
+
             # Call underlying BERT model to get encodings of query and candidates
             outputs = model.bert(input_ids=input_ids_query,
                                  attention_mask=input_mask_query,
@@ -173,19 +173,10 @@ def train_spc_and_mlm(model, pooler, tokenizer, optimizer, scheduler, dataset, a
 
             # Do MLM on last hidden states obtained using query
             # inputs.
-            pred_scores = model.cls(query_last_hidden_states)
-            loss_fct = CrossEntropyLoss()
-            query_mlm_loss = loss_fct(pred_scores.view(-1, model.config.vocab_size), lm_label_ids.view(-1))
-            query_mlm_acc = accuracy(pred_scores.view(-1, model.config.vocab_size), lm_label_ids.view(-1))
-            query_mlm_accs.append(query_mlm_acc)
-            
-            # Backprop on this part of the loss
-            query_mlm_loss = adjust_loss(query_mlm_loss, args)            
-            query_mlm_loss.backward(retain_graph=True)
-            query_mlm_losses.append(query_mlm_loss.item())
-            
+            mlm_pred_scores = model.cls(query_last_hidden_states)
+
             # Get encodings of query and candidates for SPC
-            query_encodings = pooler(query_last_hidden_states)            
+            query_encodings = pooler(query_last_hidden_states)
             all_cand_encodings = []            
             for i in range(2):
                 outputs = model.bert(input_ids=input_ids_cands[:,i,:],
@@ -196,19 +187,9 @@ def train_spc_and_mlm(model, pooler, tokenizer, optimizer, scheduler, dataset, a
                 encodings = pooler(last_hidden_states)
                 all_cand_encodings.append(encodings.unsqueeze(1))
             cand_encodings = torch.cat(all_cand_encodings, dim=1)            
-            
-            # Score candidates using dot(query, candidate)
-            scores = torch.bmm(cand_encodings, query_encodings.unsqueeze(2)).squeeze(2)
 
-            # Compute loss and accuracy of SPC
-            spc_loss = loss_fct(scores, cand_labels)
-            spc_acc = accuracy(scores, cand_labels)
-            spc_accs.append(spc_acc)
-            
-            # Backprop on this part of the loss
-            spc_loss = adjust_loss(spc_loss, args)
-            spc_loss.backward(retain_graph=(mlm_dataset is not None))
-            spc_losses.append(spc_loss.item())
+            # Score candidates using dot(query, candidate)
+            spc_scores = torch.bmm(cand_encodings, query_encodings.unsqueeze(2)).squeeze(2)
 
             # Do MLM on mlm_dataset if provided. First, upack batch
             extra_mlm_loss = None
@@ -225,15 +206,32 @@ def train_spc_and_mlm(model, pooler, tokenizer, optimizer, scheduler, dataset, a
                                 token_type_ids=xsegment_ids,
                                 lm_labels=xlm_label_ids,
                                 position_ids=None)
-                extra_mlm_loss = outputs[0]
                 extra_mlm_pred_scores = outputs[1]
+                
+            # Compute loss, do backprop. Compute accuracies.
+            loss_fct = CrossEntropyLoss()
+            loss = loss_fct(mlm_pred_scores.view(-1, model.config.vocab_size), lm_label_ids.view(-1))
+            query_mlm_losses.append(loss.item())
+            spc_loss = loss_fct(spc_scores, cand_labels)
+            loss = loss + spc_loss
+            spc_losses.append(spc_loss.item())
+            if mlm_dataset is not None:
+                extra_mlm_loss = loss_fct(extra_mlm_pred_scores.view(-1, model.config.vocab_size), xlm_label_ids.view(-1))
+                loss = loss + extra_mlm_loss
+                extra_mlm_losses.append(extra_mlm_loss.item())
+
+            # Backprop
+            loss = adjust_loss(loss, args)
+            loss.backward()
+
+            # Compute accuracies
+            query_mlm_acc = accuracy(mlm_pred_scores.view(-1, model.config.vocab_size), lm_label_ids.view(-1))
+            query_mlm_accs.append(query_mlm_acc)
+            spc_acc = accuracy(spc_scores, cand_labels)
+            spc_accs.append(spc_acc)
+            if mlm_dataset is not None:
                 extra_mlm_acc = accuracy(extra_mlm_pred_scores.view(-1, model.config.vocab_size), xlm_label_ids.view(-1))
                 extra_mlm_accs.append(extra_mlm_acc)
-                
-                # Backprop on this part of the loss
-                extra_mlm_loss = adjust_loss(extra_mlm_loss, args)
-                extra_mlm_loss.backward()
-                extra_mlm_losses.append(extra_mlm_loss.item())
 
             # Check if we accumulate grad or do an optimization step
             if (step + 1) % args.gradient_accumulation_steps == 0:
@@ -444,7 +442,7 @@ def main():
                         default=42,
                         help="random seed for initialization")
     args = parser.parse_args()
-    
+
     # Check whether bert_model_or_config_file is a file or directory
     if os.path.isdir(args.bert_model_or_config_file):
         pretrained=True
