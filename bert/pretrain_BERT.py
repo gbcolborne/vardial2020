@@ -54,7 +54,9 @@ def accuracy(pred_scores, labels):
     ytrue = labels.cpu().numpy()
     ypred = pred_scores.detach().cpu().numpy()    
     ypred = np.argmax(ypred, axis=1)
-    return np.sum(ypred == ytrue)
+    assert len(ytrue) == len(ypred)
+    accuracy = np.sum(ypred == ytrue)/len(ytrue)
+    return accuracy
 
 
 def check_for_unk_train_data(train_paths):
