@@ -50,9 +50,11 @@ def count_params(model):
     return count
 
 
-def accuracy(out, labels):
-    outputs = np.argmax(out, axis=1)
-    return np.sum(outputs == labels)
+def accuracy(pred_scores, labels):
+    ytrue = labels.cpu().numpy()
+    ypred = pred_scores.detach().cpu().numpy()    
+    ypred = np.argmax(ypred, axis=1)
+    return np.sum(ypred == ytrue)
 
 
 def check_for_unk_train_data(train_paths):
@@ -68,6 +70,24 @@ def get_dataloader(dataset, batch_size, local_rank):
     else:
         sampler = DistributedSampler(dataset)
     return DataLoader(dataset, sampler=sampler, batch_size=batch_size)
+
+
+def weighted_avg(vals, weights):
+    vals = np.asarray(vals)
+    weights = np.asarray(weights)
+    assert len(vals.shape) == 1
+    assert vals.shape == weights.shape
+    probs = weights / weights.sum()
+    return np.sum(vals * probs)    
+
+
+def adjust_loss(loss, args):
+    # Adapt loss for distributed training or gradient accumulation
+    if args.n_gpu > 1:
+        loss = loss.mean() # mean() to average on multi-gpu.
+    if args.gradient_accumulation_steps > 1:
+        loss = loss / args.gradient_accumulation_steps
+    return loss
 
 
 def train_spc_and_mlm(model, pooler, tokenizer, optimizer, scheduler, dataset, args, train_log_path, mlm_dataset=None):
@@ -93,8 +113,11 @@ def train_spc_and_mlm(model, pooler, tokenizer, optimizer, scheduler, dataset, a
         assert len(dataset) == len(mlm_dataset)
         
     # Write header in log
+    header = "GlobalStep\tLossMLM\tAccuracyMLM\tLossSPC\tAccuracySPC"
+    if mlm_dataset is not None:
+        header += "\tLossExtraMLM\tAccuracyExtraMLM"
     with open(train_log_path, "w") as f:
-        f.write("GlobalStep\tTrainLoss\n")
+        f.write(header + "\n")
         
     # Start training
     global_step = 0  # Number of optimization steps (less than number of model calls if we accumulate gradients)
@@ -112,15 +135,22 @@ def train_spc_and_mlm(model, pooler, tokenizer, optimizer, scheduler, dataset, a
               if mlm_dataset is not None:
                   mlm_dataset.resample()
                   
-        # Make dataloader
+        # Make dataloader(s)
         dataloader = get_dataloader(dataset, args.train_batch_size, args.local_rank)
         if mlm_dataset is not None:
             mlm_dataloader = get_dataloader(mlm_dataset, args.train_batch_size, args.local_rank)
-
+            assert len(mlm_dataloader) == len(dataloader)           
+            mlm_batch_enum = enumerate(mlm_dataloader)
+        
         # Some stats for this epoch
-        tr_loss = 0
-        nb_tr_examples = 0
-
+        real_batch_sizes = []
+        query_mlm_losses = []
+        query_mlm_accs = []
+        spc_losses = []
+        spc_accs = []
+        extra_mlm_losses = []
+        extra_mlm_accs = []
+        
         # Run training for one epoch
         for step, batch in enumerate(tqdm(dataloader, desc="Iteration")):            
             batch = tuple(t.to(args.device) for t in batch)
@@ -132,7 +162,8 @@ def train_spc_and_mlm(model, pooler, tokenizer, optimizer, scheduler, dataset, a
             segment_ids_cands = batch[5]
             cand_labels = batch[6]
             lm_label_ids = batch[7]
-
+            real_batch_sizes.append(len(input_ids_query))
+            
             # Call underlying BERT model to get encodings of query and candidates
             outputs = model.bert(input_ids=input_ids_query,
                                  attention_mask=input_mask_query,
@@ -145,7 +176,14 @@ def train_spc_and_mlm(model, pooler, tokenizer, optimizer, scheduler, dataset, a
             pred_scores = model.cls(query_last_hidden_states)
             loss_fct = CrossEntropyLoss()
             query_mlm_loss = loss_fct(pred_scores.view(-1, model.config.vocab_size), lm_label_ids.view(-1))
-
+            query_mlm_acc = accuracy(pred_scores.view(-1, model.config.vocab_size), lm_label_ids.view(-1))
+            query_mlm_accs.append(query_mlm_acc)
+            
+            # Backprop on this part of the loss
+            query_mlm_loss = adjust_loss(query_mlm_loss, args)            
+            query_mlm_loss.backward(retain_graph=True)
+            query_mlm_losses.append(query_mlm_loss.item())
+            
             # Get encodings of query and candidates for SPC
             query_encodings = pooler(query_last_hidden_states)            
             all_cand_encodings = []            
@@ -162,13 +200,22 @@ def train_spc_and_mlm(model, pooler, tokenizer, optimizer, scheduler, dataset, a
             # Score candidates using dot(query, candidate)
             scores = torch.bmm(cand_encodings, query_encodings.unsqueeze(2)).squeeze(2)
 
-            # Compute loss
+            # Compute loss and accuracy of SPC
             spc_loss = loss_fct(scores, cand_labels)
+            spc_acc = accuracy(scores, cand_labels)
+            spc_accs.append(spc_acc)
             
+            # Backprop on this part of the loss
+            spc_loss = adjust_loss(spc_loss, args)
+            spc_loss.backward(retain_graph=(mlm_dataset is not None))
+            spc_losses.append(spc_loss.item())
+
             # Do MLM on mlm_dataset if provided. First, upack batch
             extra_mlm_loss = None
             if mlm_dataset is not None:
-                mlm_batch = next(mlm_dataloader)
+                mlm_batch_id, mlm_batch = next(mlm_batch_enum)
+                # Make sure the training steps are synced
+                assert mlm_batch_id == step
                 mlm_batch = tuple(t.to(args.device) for t in mlm_batch)
                 xinput_ids, xinput_mask, xsegment_ids, xlm_label_ids = mlm_batch
                 # Make sure the batch sizes are equal
@@ -179,21 +226,14 @@ def train_spc_and_mlm(model, pooler, tokenizer, optimizer, scheduler, dataset, a
                                 lm_labels=xlm_label_ids,
                                 position_ids=None)
                 extra_mlm_loss = outputs[0]
-                extra_mlm_pred_scores = output[1]
+                extra_mlm_pred_scores = outputs[1]
+                extra_mlm_acc = accuracy(extra_mlm_pred_scores.view(-1, model.config.vocab_size), xlm_label_ids.view(-1))
+                extra_mlm_accs.append(extra_mlm_acc)
                 
-            # Combine_losses
-            loss = query_mlm_loss + spc_loss
-            if mlm_dataset is not None:
-                loss = loss + extra_mlm_loss
-            if args.n_gpu > 1:
-                loss = loss.mean() # mean() to average on multi-gpu.
-            if args.gradient_accumulation_steps > 1:
-                loss = loss / args.gradient_accumulation_steps
-
-            # Backprop
-            loss.backward()
-            tr_loss += loss.item()
-            nb_tr_examples += input_ids_query.size(0)
+                # Backprop on this part of the loss
+                extra_mlm_loss = adjust_loss(extra_mlm_loss, args)
+                extra_mlm_loss.backward()
+                extra_mlm_losses.append(extra_mlm_loss.item())
 
             # Check if we accumulate grad or do an optimization step
             if (step + 1) % args.gradient_accumulation_steps == 0:
@@ -203,16 +243,39 @@ def train_spc_and_mlm(model, pooler, tokenizer, optimizer, scheduler, dataset, a
                 global_step += 1
                 if global_step >= args.num_optimization_steps:
                     break
-        avg_loss = tr_loss / nb_tr_examples
 
-        # Update training log
-        log_data = [str(global_step), "{:.5f}".format(avg_loss)]
+        # Compute stats for this epoch
+        avg_query_mlm_loss = weighted_avg(query_mlm_losses, real_batch_sizes)
+        avg_query_mlm_acc = weighted_avg(query_mlm_accs, real_batch_sizes)
+        avg_spc_loss = weighted_avg(spc_losses, real_batch_sizes)
+        avg_spc_acc = weighted_avg(spc_accs, real_batch_sizes)
+        if mlm_dataset is not None:
+            avg_extra_mlm_loss = weighted_avg(extra_mlm_losses, real_batch_sizes)
+            avg_extra_mlm_acc = weighted_avg(extra_mlm_accs, real_batch_sizes)
+        
+        # Write stats for this epoch in log
+        log_data = []
+        log_data.append(str(global_step))
+        log_data.append("{:.5f}".format(avg_query_mlm_loss))
+        log_data.append("{:.5f}".format(avg_query_mlm_acc))
+        log_data.append("{:.5f}".format(avg_spc_loss))
+        log_data.append("{:.5f}".format(avg_spc_acc))
+        if mlm_dataset is not None:
+            log_data.append("{:.5f}".format(avg_extra_mlm_loss))
+            log_data.append("{:.5f}".format(avg_extra_mlm_acc))        
+        
         with open(train_log_path, "a") as f:
             f.write("\t".join(log_data)+"\n")
 
-        # Save model
+        # Save model at end of each epoch
         model_to_save = model.module if hasattr(model, 'module') else model  # Only save the model it-self
         model_to_save.save_pretrained(args.output_dir)
+
+        # Save state dict of pooler
+        fn = os.path.join(args.output_dir, "pooler.pt")
+        torch.save(pooler.state_dict(), fn)
+
+        # Save tokenizer
         fn = os.path.join(args.output_dir, "tokenizer.pkl")
         with open(fn, "wb") as f:
             pickle.dump(tokenizer, f)
@@ -232,8 +295,9 @@ def train_mlm(model, tokenizer, optimizer, scheduler, dataset, args, train_log_p
 
     """
     # Write header in log
+    header = "GlobalStep\tLossMLM\tAccuracyMLM"
     with open(train_log_path, "w") as f:
-        f.write("GlobalStep\tTrainLoss\n")
+        f.write(header + "\n")
         
     # Start training
     global_step = 0  # Number of optimization steps (less than number of model calls if we accumulate gradients)
@@ -255,25 +319,28 @@ def train_mlm(model, tokenizer, optimizer, scheduler, dataset, args, train_log_p
         # Some stats for this epoch
         tr_loss = 0
         nb_tr_examples = 0
-
+        real_batch_sizes = []
+        accs = []
+        
         # Run training for one epoch
         for step, batch in enumerate(tqdm(dataloader, desc="Iteration")):            
             batch = tuple(t.to(args.device) for t in batch)
             input_ids, input_mask, segment_ids, lm_label_ids = batch
+            real_batch_sizes.append(len(input_ids))
             
-            # Call model. Note: if position_ids is None, they
-            # assume input IDs are in order starting at position 0
+            # Call model.
             outputs = model(input_ids=input_ids,
                             attention_mask=input_mask,
                             token_type_ids=segment_ids,
                             lm_labels=lm_label_ids,
                             position_ids=None)
             loss = outputs[0]
-            pred_scores = output[1]
-            if args.n_gpu > 1:
-                loss = loss.mean() # mean() to average on multi-gpu.
-            if args.gradient_accumulation_steps > 1:
-                loss = loss / args.gradient_accumulation_steps
+            pred_scores = outputs[1]
+            acc = accuracy(pred_scores.view(-1, model.config.vocab_size), lm_label_ids.view(-1))
+            accs.append(acc)
+
+            # Backprop
+            loss = adjust_loss(loss, args)
             loss.backward()
             tr_loss += loss.item()
             nb_tr_examples += input_ids.size(0)
@@ -285,9 +352,13 @@ def train_mlm(model, tokenizer, optimizer, scheduler, dataset, args, train_log_p
                 if global_step >= args.num_optimization_steps:
                     break
         avg_loss = tr_loss / nb_tr_examples
-
+        avg_acc = weighted_avg(accs, real_batch_sizes)
+        
         # Update training log
-        log_data = [str(global_step), "{:.5f}".format(avg_loss)]
+        log_data = []
+        log_data.append(str(global_step))
+        log_data.append("{:.5f}".format(avg_loss))
+        log_data.append("{:.5f}".format(avg_acc))
         with open(train_log_path, "a") as f:
             f.write("\t".join(log_data)+"\n")
 
