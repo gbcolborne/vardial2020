@@ -29,7 +29,7 @@ import torch
 from torch.nn import CrossEntropyLoss
 from torch.utils.data import DataLoader, RandomSampler
 from torch.utils.data.distributed import DistributedSampler
-from transformers import BertForMaskedLM, BertConfig, WEIGHTS_NAME, CONFIG_NAME
+from transformers import BertForMaskedLM, BertConfig
 from transformers import AdamW
 from transformers.optimization import get_linear_schedule_with_warmup
 from tqdm import tqdm, trange
@@ -87,12 +87,12 @@ def adjust_loss(loss, args):
     # Adapt loss for distributed training or gradient accumulation
     if args.n_gpu > 1:
         loss = loss.mean() # mean() to average on multi-gpu.
-    if args.gradient_accumulation_steps > 1:
-        loss = loss / args.gradient_accumulation_steps
+    if args.grad_accum_steps > 1:
+        loss = loss / args.grad_accum_steps
     return loss
 
 
-def train_spc_and_mlm(model, pooler, tokenizer, optimizer, scheduler, dataset, args, train_log_path, mlm_dataset=None):
+def train_spc_and_mlm(model, pooler, tokenizer, optimizer, scheduler, dataset, args, train_log_path, checkpoint_data, mlm_dataset=None):
     """Pretrain a BertModelForMaskedLM using both sentence pair
     classification and MLM.
     
@@ -105,6 +105,7 @@ def train_spc_and_mlm(model, pooler, tokenizer, optimizer, scheduler, dataset, a
     - dataset: BertDatasetForSPCandMLM
     - args
     - train_log_path
+    - checkpoint_data: dict
     - (Optional) mlm_dataset: a BertDatasetForMLM. If provided, we add
     a batch from this to every batch of the other dataset. This is
     useful for pre-training on the unlabeled test data, which we can
@@ -122,13 +123,12 @@ def train_spc_and_mlm(model, pooler, tokenizer, optimizer, scheduler, dataset, a
         f.write(header + "\n")
         
     # Start training
-    global_step = 0  # Number of optimization steps (less than number of model calls if we accumulate gradients)
     logger.info("***** Running training *****")
     logger.info("  Num examples = %d", len(dataset))
     logger.info("  Batch size = %d", args.train_batch_size)
-    logger.info("  Num training steps = %d", args.num_train_steps)
-    logger.info("  Num accumulation steps = %d", args.gradient_accumulation_steps)
-    logger.info("  Num optimization steps = %d", args.num_optimization_steps)
+    logger.info("  Num training steps = %d", args.max_train_steps)
+    logger.info("  Num accumulation steps = %d", args.grad_accum_steps)
+    logger.info("  Num optimization steps = %d", args.max_opt_steps)
     model.train()
     for epoch in trange(int(args.num_epochs), desc="Epoch"):
         # Get fresh training samples
@@ -236,12 +236,12 @@ def train_spc_and_mlm(model, pooler, tokenizer, optimizer, scheduler, dataset, a
                 extra_mlm_accs.append(extra_mlm_acc)
 
             # Check if we accumulate grad or do an optimization step
-            if (step + 1) % args.gradient_accumulation_steps == 0:
+            if (step + 1) % args.grad_accum_steps == 0:
                 optimizer.step()
                 optimizer.zero_grad()
                 scheduler.step()
-                global_step += 1
-                if global_step >= args.num_optimization_steps:
+                checkpoint_data["global_step"] += 1
+                if checkpoint_data["global_step"] >= checkpoint_data["max_opt_steps"]:
                     break
 
         # Compute stats for this epoch
@@ -255,7 +255,7 @@ def train_spc_and_mlm(model, pooler, tokenizer, optimizer, scheduler, dataset, a
         
         # Write stats for this epoch in log
         log_data = []
-        log_data.append(str(global_step))
+        log_data.append(str(checkpoint_data["global_step"]))
         log_data.append("{:.5f}".format(avg_query_mlm_loss))
         log_data.append("{:.5f}".format(avg_query_mlm_acc))
         log_data.append("{:.5f}".format(avg_spc_loss))
@@ -269,8 +269,6 @@ def train_spc_and_mlm(model, pooler, tokenizer, optimizer, scheduler, dataset, a
         # Save checkpoint
         model_to_save = model.module if hasattr(model, 'module') else model
         pooler_to_save = pooler.module if hasattr(pooler, 'module') else pooler
-        checkpoint_data = {}
-        checkpoint_data['global_step'] = global_step
         checkpoint_data['model_state_dict'] = model_to_save.state_dict()
         checkpoint_data['pooler_state_dict'] = pooler_to_save.state_dict()
         checkpoint_data['optimizer_state_dict'] = optimizer.state_dict()        
@@ -278,7 +276,7 @@ def train_spc_and_mlm(model, pooler, tokenizer, optimizer, scheduler, dataset, a
         checkpoint_path = os.path.join(args.output_dir, "checkpoint.tar")
         torch.save(checkpoint_data, checkpoint_path)
             
-def train_mlm(model, tokenizer, optimizer, scheduler, dataset, args, train_log_path):
+def train_mlm(model, tokenizer, optimizer, scheduler, dataset, args, train_log_path, checkpoint_data):
     """Pretrain a BertModelForMaskedLM using MLM only.
     
     Args:
@@ -297,12 +295,11 @@ def train_mlm(model, tokenizer, optimizer, scheduler, dataset, args, train_log_p
         f.write(header + "\n")
         
     # Start training
-    global_step = 0  # Number of optimization steps (less than number of model calls if we accumulate gradients)
     logger.info("***** Running training *****")
     logger.info("  Num examples = %d", len(dataset))
     logger.info("  Batch size = %d", args.train_batch_size)
-    logger.info("  Num training steps = %d", args.num_train_steps)
-    logger.info("  Num accumulation steps = %d", args.gradient_accumulation_steps)
+    logger.info("  Num training steps = %d", args.max_train_steps)
+    logger.info("  Num accumulation steps = %d", args.grad_accum_steps)
     logger.info("  Num optimization steps = %d", args.num_optimization_steps)
     model.train()
     for epoch in trange(int(args.num_epochs), desc="Epoch"):
@@ -341,19 +338,19 @@ def train_mlm(model, tokenizer, optimizer, scheduler, dataset, args, train_log_p
             loss.backward()
             tr_loss += loss.item()
             nb_tr_examples += input_ids.size(0)
-            if (step + 1) % args.gradient_accumulation_steps == 0:
+            if (step + 1) % args.grad_accum_steps == 0:
                 optimizer.step()
                 optimizer.zero_grad()
                 scheduler.step()
-                global_step += 1
-                if global_step >= args.num_optimization_steps:
+                checkpoint_data["global_step"] += 1
+                if checkpoint_data["global_step"] >= checkpoint_data["max_opt_steps"]:
                     break
         avg_loss = tr_loss / nb_tr_examples
         avg_acc = weighted_avg(accs, real_batch_sizes)
         
         # Update training log
         log_data = []
-        log_data.append(str(global_step))
+        log_data.append(str(checkpoint_data["global_step"]))
         log_data.append("{:.5f}".format(avg_loss))
         log_data.append("{:.5f}".format(avg_acc))
         with open(train_log_path, "a") as f:
@@ -361,8 +358,6 @@ def train_mlm(model, tokenizer, optimizer, scheduler, dataset, args, train_log_p
 
         # Save checkpoint
         model_to_save = model.module if hasattr(model, 'module') else model
-        checkpoint_data = {}
-        checkpoint_data['global_step'] = global_step
         checkpoint_data['model_state_dict'] = model_to_save.state_dict()
         checkpoint_data['optimizer_state_dict'] = optimizer.state_dict()        
         checkpoint_data['scheduler_state_dict'] = scheduler.state_dict()
@@ -378,7 +373,7 @@ def main():
                         default=None, 
                         type=str, 
                         required=True,
-                        help="Directory containing pre-trained BERT model or path of configuration file (if no pre-training).")
+                        help="Directory containing checkpoint (if resuming) or path of configuration file (if starting from scratch).")
     parser.add_argument("--dir_train_data",
                         default=None,
                         type=str,
@@ -419,15 +414,15 @@ def main():
                         default=1e-4,
                         type=float,
                         help="The initial learning rate for Adam.")
-    parser.add_argument("--num_train_steps",
+    parser.add_argument("--max_train_steps",
                         default=1000000,
                         type=int,
-                        help="Total number of training steps to perform. Note: # optimization steps = # train steps / # accumulation steps.")
+                        help="Maximum number of training steps to perform. Note: # optimization steps = # train steps / # accumulation steps.")
     parser.add_argument("--num_warmup_steps",
                         default=10000,
                         type=int,
                         help="Number of optimization steps (i.e. training steps / accumulation steps) to perform linear learning rate warmup for. ")
-    parser.add_argument('--gradient_accumulation_steps',
+    parser.add_argument('--grad_accum_steps',
                         type=int,
                         default=1,
                         help="Number of training steps (i.e. batches) to accumualte before performing a backward/update pass.")
@@ -445,20 +440,64 @@ def main():
                         help="random seed for initialization")
     args = parser.parse_args()
 
-    # Check whether bert_model_or_config_file is a file or directory
-    if os.path.isdir(args.bert_model_or_config_file):
-        pretrained=True
-        targets = [WEIGHTS_NAME, CONFIG_NAME, "tokenizer.pkl"]
-        for t in targets:
-            path = os.path.join(args.bert_model_or_config_file, t)
-            if not os.path.exists(path):
-                msg = "File '{}' not found".format(path)
-                raise ValueError(msg)
-        fp = os.path.join(args.bert_model_or_config_file, CONFIG_NAME)
-        config = BertConfig(fp)
+    # Check args
+    if args.grad_accum_steps < 1:
+        raise ValueError("Invalid grad_accum_steps parameter: {}, should be >= 1".format(
+                            args.grad_accum_steps))
+    train_paths = glob.glob(os.path.join(args.dir_train_data, "*.train"))
+    assert len(train_paths) > 0
+
+    # Make output dir
+    if not os.path.exists(args.output_dir):
+        os.makedirs(args.output_dir)
+        
+    # Check whether we are resuming a pretraining job from a
+    # checkpoint or starting from scratch (that is, if
+    # bert_model_or_config_file is a file (config) or directory
+    # (checkpoint)).
+    resuming = os.path.isdir(args.bert_model_or_config_file)
+    if resuming:
+        logger.info("***** Resuming pretraining job *******")
     else:
-        pretrained=False
+        logger.info("***** Starting pretraining job *******")
+    
+    # Load checkpoint, config, and tokenizer if we are resuming, otherwise load config file        
+    if resuming:
+        checkpoint_path = os.path.join(args.bert_model_or_config_file, "checkpoint.tar")
+        checkpoint_data = torch.load(checkpoint_path)        
+        tokenizer_path = os.path.join(args.bert_model_or_config_file, "tokenizer.pkl")
+        with open(tokenizer_path, "rb") as f:
+            tokenizer = pickle.load(f)
+        config_path = os.path.join(args.bert_model_or_config_file, "config.json")
+        config = BertConfig.from_json_file(config_path)        
+    else:
+        # Load config
         config = BertConfig.from_json_file(args.bert_model_or_config_file)
+
+        # Copy config in output directory
+        if os.path.exists(args.output_dir) and len(os.listdir(args.output_dir)) > 0:
+            msg = "Directory %s is not empty"
+            raise ValueError(msg)
+        config_path = os.path.join(args.output_dir, "config.json")
+        config.to_json_file(config_path)
+
+        # Load tokenizer
+        path_vocab = os.path.join(args.dir_train_data, "vocab.txt")
+        assert os.path.exists(path_vocab)
+        tokenizer = CharTokenizer(path_vocab)
+        if args.min_freq > 1:
+            tokenizer.trim_vocab(args.min_freq)
+        # Adapt vocab size in config
+        config.vocab_size = len(tokenizer.vocab)
+        logger.info("Size of vocab: {}".format(len(tokenizer.vocab)))
+    
+        # Save tokenizer
+        fn = os.path.join(args.output_dir, "tokenizer.pkl")
+        with open(fn, "wb") as f:
+            pickle.dump(tokenizer, f)
+
+        # Make dict for checkpoint data
+        checkpoint_data = {}
         
     # What GPUs do we use?
     if args.num_gpus == -1:
@@ -478,50 +517,22 @@ def main():
         torch.distributed.init_process_group(backend='nccl')
     logger.info("device: {} n_gpu: {}, distributed training: {}".format(
         args.device, args.n_gpu, bool(args.local_rank != -1)))
-    
-    # Check some other args
-    if args.gradient_accumulation_steps < 1:
-        raise ValueError("Invalid gradient_accumulation_steps parameter: {}, should be >= 1".format(
-                            args.gradient_accumulation_steps))
-    train_paths = glob.glob(os.path.join(args.dir_train_data, "*.train"))
-    assert len(train_paths) > 0
-    if not os.path.exists(args.output_dir):
-        os.makedirs(args.output_dir)
-                            
+
     # Seed RNGs
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     if args.n_gpu > 0:
         torch.cuda.manual_seed_all(args.seed)
-
-    # Load tokenizer
-    if pretrained:
-        fp = os.path.join(args.bert_model_or_config_file, "tokenizer.pkl")
-        with open(fp, "rb") as f:
-            tokenizer = pickle.load(f)
-    else:
-        path_vocab = os.path.join(args.dir_train_data, "vocab.txt")
-        assert os.path.exists(path_vocab)
-        tokenizer = CharTokenizer(path_vocab)
-        if args.min_freq > 1:
-            tokenizer.trim_vocab(args.min_freq)
-        # Adapt vocab size in config
-        config.vocab_size = len(tokenizer.vocab)
-        logger.info("Size of vocab: {}".format(len(tokenizer.vocab)))
-    
-    # Save tokenizer
-    fn = os.path.join(args.output_dir, "tokenizer.pkl")
-    with open(fn, "wb") as f:
-        pickle.dump(tokenizer, f)
-            
+        
     # Prepare model (and pooler if we are doing SPC)
-    if pretrained:
-        model = BertForMaskedLM.from_pretrained(args.bert_model_or_config_file)
-    else:
-        model = BertForMaskedLM(config)
+    model = BertForMaskedLM(config)
+    if resuming:
+        model.load_state_dict(checkpoint_data["model_state_dict"])
     model.to(args.device)
     if not args.mlm_only:
         pooler = Pooler(model.config.hidden_size, cls_only=(not args.avgpool_for_spc))
+        if resuming:
+            pooler.load_state_dict(checkpoint_data["pooler_state_dict"])
         pooler.to(args.device)    
     if args.local_rank != -1:
         try:
@@ -581,47 +592,83 @@ def main():
                                                   seed=args.seed)
             assert len(train_dataset_spc) == len(train_dataset_mlm)
 
-    # Comput number of optimization steps
-    args.num_optimization_steps = args.num_train_steps // args.gradient_accumulation_steps
-    if train_dataset_mlm is not None:
-        num_opt_steps_per_epoch = int(len(train_dataset_mlm) / args.train_batch_size / args.gradient_accumulation_steps)
-    elif train_dataset_spc is not None:
-        num_opt_steps_per_epoch = int(len(train_dataset_spc) / args.train_batch_size / args.gradient_accumulation_steps)
-    if args.local_rank != -1:
-        num_opt_steps_per_epoch = num_opt_steps_per_epoch // torch.distributed.get_world_size()
-    args.num_epochs = math.ceil(args.num_optimization_steps / num_opt_steps_per_epoch)    
-    logger.info("Dataset size: %d" % (len(train_dataset_mlm) if train_dataset_mlm else len(train_dataset_spc)))
-    logger.info("# optimization steps (for %d steps, # accumulation steps = %d): %d" % (args.num_train_steps,
-                                                                                        args.gradient_accumulation_steps,
-                                                                                        args.num_optimization_steps))
-    logger.info("# opt. steps/epoch (with batch size = %d, # accumulation steps = %d): %d" % (args.train_batch_size,
-                                                                                              args.gradient_accumulation_steps,
-                                                                                              num_opt_steps_per_epoch))
-    logger.info("# epochs (for %d steps, %d opt. steps): %d" % (args.num_train_steps, args.num_optimization_steps, args.num_epochs))
-    
+
     # Prepare training log
     time_str = datetime.now().strftime("%Y%m%d%H%M%S")
     train_log_path = os.path.join(args.output_dir, "%s.train.log" % time_str)
+
+
+
+    ########### The section I am struggling with is here. Once I am
+    ########### done with this section, I should review the training
+    ########### functions to make sure there handling of these 2
+    ########### objects is OK: args and
+    ########### checkpoint_data. 
     
+    # Save some parameters of the training function (or load if resuming)
+    if resuming:
+        # TODO: Check all the checkpoint data defined in the else below
+        dataset_length = len(train_dataset_spc) if train_dataset_spc is not None else len(train_dataset_mlm)
+        if checkpoint_data["dataset_length"] != dataset_length:
+            msg = "Dataset length has changed. This would mess with our expectations regarding the number of optimization steps per epoch".
+            raise RuntimeError(msg)
+    else
+        logger.info("Dataset size: %d" % (len(train_dataset_mlm) if train_dataset_mlm else len(train_dataset_spc)))
+        checkpoint_data["training_args"] = args
+        checkpoint_data["dataset_length"] = len(train_dataset_spc) if train_dataset_spc is not None else len(train_dataset_mlm)
+        checkpoint_data["global_step"] = 0
+        max_opt_steps = args.max_train_steps // args.grad_accum_steps
+        checkpoint_data["max_opt_steps"] = max_opt_steps        
+        if train_dataset_mlm is not None:
+            num_opt_steps_per_epoch = int(len(train_dataset_mlm) / args.train_batch_size / args.grad_accum_steps)
+        elif train_dataset_spc is not None:
+            num_opt_steps_per_epoch = int(len(train_dataset_spc) / args.train_batch_size / args.grad_accum_steps)
+        num_epochs = math.ceil(max_opt_steps / num_opt_steps_per_epoch)
+        checkpoint_data["num_epochs"] = num_epochs
+        logger.info("# opt. steps/epoch (with batch size = %d, # accumulation steps = %d): %d" % (args.train_batch_size,
+                                                                                                  args.grad_accum_steps,
+                                                                                                  num_opt_steps_per_epoch))
+        logger.info("# epochs (for %d steps, %d opt. steps): %d" % (args.max_train_steps, args.num_optimization_steps, args.num_epochs))
+        logger.info("Max opt. steps (for max %d steps, # acc. steps = %d): %d" % (checkpoint_data["max_train_steps"],
+                                                                                  checkpoint_data["grad_accum_steps"],
+                                                                                  checkpoint_data["max_opt_steps"]))
+
+
+    #############
+    #############
+    #############
+    #############
+    #############    
+
+        
     # Prepare optimizer
     np_list = list(model.named_parameters())
     if not args.mlm_only:
         np_list += list(pooler.named_parameters())
     no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
-    optimizer_grouped_parameters = [
+    opt_params = [
         {'params': [p for n, p in np_list if not any(nd in n for nd in no_decay)], 'weight_decay': 0.01},
         {'params': [p for n, p in np_list if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
         ]
-    optimizer = AdamW(optimizer_grouped_parameters,
+    optimizer = AdamW(opt_params,
                       lr=args.learning_rate,
                       correct_bias=True) # To reproduce BertAdam specific behaviour, use correct_bias=False
-    scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=args.num_warmup_steps, num_training_steps=args.num_optimization_steps)
+    if resuming:
+        optimizer.load_state_dict(checkpoint_data["optimizer_state_dict"])
+
+    # Prepare scheduler
+    scheduler = get_linear_schedule_with_warmup(optimizer,
+                                                num_warmup_steps=checkpoint_data["num_warmup_steps"],
+                                                num_training_steps=checkpoint_data["max_opt_steps"])
+    if resuming:
+        scheduler.load_state_dict(checkpoint_data["scheduler_state_dict"])
+
     
     # Train
     if args.mlm_only:
-        train_mlm(model, tokenizer, optimizer, scheduler, train_dataset_mlm, args, train_log_path)
+        train_mlm(model, tokenizer, optimizer, scheduler, train_dataset_mlm, args, train_log_path, checkpoint_data)
     else:
-        train_spc_and_mlm(model, pooler, tokenizer, optimizer, scheduler, train_dataset_spc, args, train_log_path, mlm_dataset=train_dataset_mlm)
+        train_spc_and_mlm(model, pooler, tokenizer, optimizer, scheduler, train_dataset_spc, args, train_log_path, checkpoint_data, mlm_dataset=train_dataset_mlm)
 
 
 if __name__ == "__main__":
