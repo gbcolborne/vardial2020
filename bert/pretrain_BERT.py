@@ -469,7 +469,7 @@ def main():
         current_num_gpus = args.num_gpus
         current_seed = args.seed
         checkpoint_dir = args.bert_model_or_config_file
-        args = deepcopy(checkpointdata["initial_args"])
+        args = deepcopy(checkpoint_data["initial_args"])
         args.num_gpus = current_num_gpus
         args.seed = current_seed
         args.bert_model_or_config_file = checkpoint_dir
@@ -640,6 +640,8 @@ def main():
     logger.info("Max training steps: %d" % args.max_train_steps)
     logger.info("Gradient accumulation steps: %d" % args.grad_accum_steps)
     logger.info("Max optimization steps: %d" % checkpoint_data["max_opt_steps"])
+    if args.resume:
+        logger.info("Nb optimization steps done so far: %d" % checkpoint_data["global_step"])
     logger.info("Dataset size: %d" % (dataset_length))
     logger.info("Batch size: %d" % args.train_batch_size)
     logger.info("# optimization steps/epoch: %d" % (num_opt_steps_per_epoch))
