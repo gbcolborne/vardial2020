@@ -24,6 +24,7 @@ Code based on: https://github.com/huggingface/pytorch-pretrained-BERT/blob/maste
 import os, argparse, logging, pickle, glob, math
 from io import open
 from datetime import datetime
+from copy import deepcopy
 import numpy as np
 import torch
 from torch.nn import CrossEntropyLoss
@@ -365,15 +366,18 @@ def main():
                         help=("Path of configuration file (if starting from scratch) or directory"
                               " containing checkpoint (if resuming) or directory containig a"
                               " pretrained model and tokenizer (if re-training)."))
+
+    # Use for resuming from checkpoint
+    parser.add_argument("--resume",
+                        action='store_true',
+                        help="Resume from checkpoint")
+    
+    # Required if not resuming
     parser.add_argument("--dir_train_data",
-                        default=None,
                         type=str,
-                        required=True,
                         help="Path of a directory containing training files (names must match <lang>.train) and vocab.txt")
     parser.add_argument("--output_dir",
-                        default=None,
                         type=str,
-                        required=True,
                         help="The output directory where the model checkpoints will be written.")
 
     ## Other parameters
@@ -431,22 +435,16 @@ def main():
                         help="random seed for initialization")
     args = parser.parse_args()
 
+    # These args are required if we are not resuming from checkpoint
+    if not args.resume:
+        assert args.dir_train_data is not None
+        assert args.output_dir is not None
+        
     # Check whether we are starting from scratch, resuming from a checkpoint, or retraining a pretrained model
-    from_scratch = not os.path.isdir(args.bert_model_or_config_file)
-    if from_scratch:
-        resuming = False
-        retraining = False
-    else:
-        checkpoint_path = os.path.join(args.bert_model_or_config_file, "checkpoint.tar")
-        if os.path.exists(checkpoint_path):
-            resuming = True
-            retraining = False
-
-        else:
-            resuming = False
-            retraining = True
-
-    # Load config or checkpoint data
+    from_scratch = (not args.resume) and os.path.isdir(args.bert_model_or_config_file)
+    retraining = (not args.resume) and (not from_scratch)
+    
+    # Load config. Load or create checkpoint data.
     if from_scratch:
         logger.info("***** Starting pretraining job from scratch *******")
         config = BertConfig.from_json_file(args.bert_model_or_config_file)
@@ -457,24 +455,32 @@ def main():
         model = BertModel.from_pretrained(args.bert_model_or_config_file)
         config = model.config
         checkpoint_data = {}
-    elif resuming:
+    elif args.resume:
         logger.info("***** Resuming pretraining job *******")
         logger.info("Loading checkpoint...")
+        checkpoint_path = os.path.join(args.bert_model_or_config_file, "checkpoint.tar")        
         checkpoint_data = torch.load(checkpoint_path)
         # Make sure we haven't already done the maximum number of optimization steps
         if checkpoint_data["global_step"] >= checkpoint_data["max_opt_steps"]:
             msg = "We have already done %d optimization steps." % checkpoint_data["global_step"]
             raise RuntimeError(msg)
         logger.info("Resuming from global step %d" % checkpoint_data["global_step"])
-        # Replace args with initial args for this job, except for num_gpus
+        # Replace args with initial args for this job, except for num_gpus, seed and model directory
         current_num_gpus = args.num_gpus
-        args = checkpoint_data["initial_args"]
+        current_seed = args.seed
+        checkpoint_dir = args.bert_model_or_config_file
+        args = deepcopy(checkpointdata["initial_args"])
         args.num_gpus = current_num_gpus
-        logger.info("Args (reloaded from checkpoint): %s" % args)
+        args.seed = current_seed
+        args.bert_model_or_config_file = checkpoint_dir
+        args.resume = True
+        logger.info("Args (most have been reloaded from checkpoint): %s" % args)
         # Load config
         config_path = os.path.join(args.bert_model_or_config_file, "config.json")
         config = BertConfig.from_json_file(config_path)        
 
+
+        
     # Check args
     if args.grad_accum_steps < 1:
         raise ValueError("Invalid grad_accum_steps parameter: {}, should be >= 1".format(
@@ -483,12 +489,12 @@ def main():
     assert len(train_paths) > 0
     if not os.path.exists(args.output_dir):
         os.makedirs(args.output_dir)
-    if (from_scratch or retraining) and len(os.listdir(args.output_dir)) > 0:
+    if (not args.resume) and len(os.listdir(args.output_dir)) > 0:
         msg = "Directory %s is not empty"
         raise ValueError(msg)
     
     # Make or load tokenizer
-    if resuming or retraining:
+    if args.resume or retraining:
         logger.info("Loading tokenizer...")
         tokenizer_path = os.path.join(args.bert_model_or_config_file, "tokenizer.pkl")
         with open(tokenizer_path, "rb") as f:
@@ -510,7 +516,7 @@ def main():
     logger.info("Size of vocab: {}".format(len(tokenizer.vocab)))
 
     # Copy config in output directory
-    if from_scratch or retraining:
+    if not args.resume:
         config_path = os.path.join(args.output_dir, "config.json")
         config.to_json_file(config_path)
         
@@ -540,16 +546,16 @@ def main():
         torch.cuda.manual_seed_all(args.seed)
                     
     # Prepare model 
-    if from_scratch or resuming:
+    if from_scratch or args.resume:
         model = BertForMaskedLM(config)
-        if resuming:
+        if args.resume:
             model.load_state_dict(checkpoint_data["model_state_dict"])
     model.to(args.device)
 
     # Prepare pooler (if we are doing SPC)
     if not args.mlm_only:
         pooler = Pooler(model.config.hidden_size, cls_only=(not args.avgpool_for_spc))
-        if resuming:
+        if args.resume:
             pooler.load_state_dict(checkpoint_data["pooler_state_dict"])
         pooler.to(args.device)
 
@@ -618,7 +624,7 @@ def main():
     dataset_length = len(train_dataset_spc) if train_dataset_spc is not None else len(train_dataset_mlm)
 
     # Store optimization steps performed and maximum number of optimization steps 
-    if not resuming:
+    if not args.resume:
         checkpoint_data["global_step"] = 0
         checkpoint_data["max_opt_steps"] = args.max_train_steps // args.grad_accum_steps
 
@@ -652,7 +658,7 @@ def main():
     optimizer = AdamW(opt_params,
                       lr=args.learning_rate,
                       correct_bias=True) # To reproduce BertAdam specific behaviour, use correct_bias=False
-    if resuming:
+    if args.resume:
         optimizer.load_state_dict(checkpoint_data["optimizer_state_dict"])
 
     # Prepare scheduler
@@ -660,12 +666,12 @@ def main():
     scheduler = get_linear_schedule_with_warmup(optimizer,
                                                 num_warmup_steps=args.num_warmup_steps,
                                                 num_training_steps=checkpoint_data["max_opt_steps"])
-    if resuming:
+    if args.resume:
         scheduler.load_state_dict(checkpoint_data["scheduler_state_dict"])
         logger.info("Current learning rate: %f" % scheduler.get_last_lr()[0])
 
     # Save initial training args
-    if not resuming:
+    if not args.resume:
         checkpoint_data["initial_args"] = args
     
     # Prepare training log
