@@ -235,7 +235,7 @@ def train_spc_and_mlm(model, pooler, tokenizer, optimizer, scheduler, dataset, a
                 optimizer.zero_grad()
                 scheduler.step()
                 checkpoint_data["global_step"] += 1
-                if checkpoint_data["global_step"] >= args.max_opt_steps:
+                if checkpoint_data["global_step"] >= checkpoint_data["max_opt_steps"]:
                     break
 
         # Compute stats for this epoch
@@ -332,7 +332,7 @@ def train_mlm(model, tokenizer, optimizer, scheduler, dataset, args, checkpoint_
                 optimizer.zero_grad()
                 scheduler.step()
                 checkpoint_data["global_step"] += 1
-                if checkpoint_data["global_step"] >= args.max_opt_steps:
+                if checkpoint_data["global_step"] >= checkpoint_data["max_opt_steps"]:
                     break
         avg_loss = tr_loss / nb_tr_examples
         avg_acc = weighted_avg(accs, real_batch_sizes)
@@ -362,7 +362,9 @@ def main():
                         default=None, 
                         type=str, 
                         required=True,
-                        help="Directory containing checkpoint (if resuming) or path of configuration file (if starting from scratch).")
+                        help=("Path of configuration file (if starting from scratch) or directory"
+                              " containing checkpoint (if resuming) or directory containig a"
+                              " pretrained model and tokenizer (if re-training)."))
     parser.add_argument("--dir_train_data",
                         default=None,
                         type=str,
@@ -429,16 +431,50 @@ def main():
                         help="random seed for initialization")
     args = parser.parse_args()
 
-    # Check whether we are resuming a pretraining job from a
-    # checkpoint or starting from scratch (that is, if
-    # bert_model_or_config_file is a file (config) or directory
-    # (checkpoint)).
-    resuming = os.path.isdir(args.bert_model_or_config_file)
-    if resuming:
-        logger.info("***** Resuming pretraining job *******")
+    # Check whether we are starting from scratch, resuming from a checkpoint, or retraining a pretrained model
+    from_scratch = not os.path.isdir(args.bert_model_or_config_file)
+    if from_scratch:
+        resuming = False
+        retraining = False
     else:
-        logger.info("***** Starting pretraining job *******")
-    
+        checkpoint_path = os.path.join(args.bert_model_or_config_file, "checkpoint.tar")
+        if os.path.exists(checkpoint_path):
+            resuming = True
+            retraining = False
+
+        else:
+            resuming = False
+            retraining = True
+
+    # Load config or checkpoint data
+    if from_scratch:
+        logger.info("***** Starting pretraining job from scratch *******")
+        config = BertConfig.from_json_file(args.bert_model_or_config_file)
+        checkpoint_data = {}
+    elif retraining:
+        logger.info("***** Starting pretraining job from pre-trained model *******")
+        logger.info("Loading pretrained model...")
+        model = BertModel.from_pretrained(args.bert_model_or_config_file)
+        config = model.config
+        checkpoint_data = {}
+    elif resuming:
+        logger.info("***** Resuming pretraining job *******")
+        logger.info("Loading checkpoint...")
+        checkpoint_data = torch.load(checkpoint_path)
+        # Make sure we haven't already done the maximum number of optimization steps
+        if checkpoint_data["global_step"] >= checkpoint_data["max_opt_steps"]:
+            msg = "We have already done %d optimization steps." % checkpoint_data["global_step"]
+            raise RuntimeError(msg)
+        logger.info("Resuming from global step %d" % checkpoint_data["global_step"])
+        # Replace args with initial args for this job, except for num_gpus
+        current_num_gpus = args.num_gpus
+        args = checkpoint_data["initial_args"]
+        args.num_gpus = current_num_gpus
+        logger.info("Args (reloaded from checkpoint): %s" % args)
+        # Load config
+        config_path = os.path.join(args.bert_model_or_config_file, "config.json")
+        config = BertConfig.from_json_file(config_path)        
+
     # Check args
     if args.grad_accum_steps < 1:
         raise ValueError("Invalid grad_accum_steps parameter: {}, should be >= 1".format(
@@ -447,27 +483,18 @@ def main():
     assert len(train_paths) > 0
     if not os.path.exists(args.output_dir):
         os.makedirs(args.output_dir)
-    if resuming:
-        if args.learning_rate != parser.get_default("learning_rate"):
-            logger.warning("Ignoring option `learning_rate`, as we are resuming from a checkpoint, and reloading a learning rate scheduler.")
-        if args.num_warmup_steps != parser.get_default("num_warmup_steps"):
-            logger.warning("Ignoring option `num_warmup_steps`, as we are resuming from a checkpoint, and reloading a learning rate scheduler.")
+    if (from_scratch or retraining) and len(os.listdir(args.output_dir)) > 0:
+        msg = "Directory %s is not empty"
+        raise ValueError(msg)
     
-    # Load checkpoint, config, and tokenizer if we are resuming, otherwise load config file        
-    if resuming:
-        checkpoint_path = os.path.join(args.bert_model_or_config_file, "checkpoint.tar")
-        checkpoint_data = torch.load(checkpoint_path)
-        logger.info("Resuming from global step %d" % checkpoint_data["global_step"])
+    # Make or load tokenizer
+    if resuming or retraining:
+        logger.info("Loading tokenizer...")
         tokenizer_path = os.path.join(args.bert_model_or_config_file, "tokenizer.pkl")
         with open(tokenizer_path, "rb") as f:
             tokenizer = pickle.load(f)
-        config_path = os.path.join(args.bert_model_or_config_file, "config.json")
-        config = BertConfig.from_json_file(config_path)        
-    else:
-        # Load config
-        config = BertConfig.from_json_file(args.bert_model_or_config_file)
-
-        # Load tokenizer
+    elif from_scratch:
+        logger.info("Making tokenizer...")
         path_vocab = os.path.join(args.dir_train_data, "vocab.txt")
         assert os.path.exists(path_vocab)
         tokenizer = CharTokenizer(path_vocab)
@@ -475,22 +502,17 @@ def main():
             tokenizer.trim_vocab(args.min_freq)
         # Adapt vocab size in config
         config.vocab_size = len(tokenizer.vocab)
-        logger.info("Size of vocab: {}".format(len(tokenizer.vocab)))
 
-        # Copy config in output directory
-        if len(os.listdir(args.output_dir)) > 0:
-            msg = "Directory %s is not empty"
-            raise ValueError(msg)
-        config_path = os.path.join(args.output_dir, "config.json")
-        config.to_json_file(config_path)
-        
         # Save tokenizer
         fn = os.path.join(args.output_dir, "tokenizer.pkl")
         with open(fn, "wb") as f:
             pickle.dump(tokenizer, f)
+    logger.info("Size of vocab: {}".format(len(tokenizer.vocab)))
 
-        # Make dict for checkpoint data
-        checkpoint_data = {}
+    # Copy config in output directory
+    if from_scratch or retraining:
+        config_path = os.path.join(args.output_dir, "config.json")
+        config.to_json_file(config_path)
         
     # What GPUs do we use?
     if args.num_gpus == -1:
@@ -510,23 +532,28 @@ def main():
         torch.distributed.init_process_group(backend='nccl')
     logger.info("device: {} n_gpu: {}, distributed training: {}".format(
         args.device, args.n_gpu, bool(args.local_rank != -1)))
-
+    
     # Seed RNGs
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     if args.n_gpu > 0:
         torch.cuda.manual_seed_all(args.seed)
                     
-    # Prepare model (and pooler if we are doing SPC)
-    model = BertForMaskedLM(config)
-    if resuming:
-        model.load_state_dict(checkpoint_data["model_state_dict"])
+    # Prepare model 
+    if from_scratch or resuming:
+        model = BertForMaskedLM(config)
+        if resuming:
+            model.load_state_dict(checkpoint_data["model_state_dict"])
     model.to(args.device)
+
+    # Prepare pooler (if we are doing SPC)
     if not args.mlm_only:
         pooler = Pooler(model.config.hidden_size, cls_only=(not args.avgpool_for_spc))
         if resuming:
             pooler.load_state_dict(checkpoint_data["pooler_state_dict"])
-        pooler.to(args.device)    
+        pooler.to(args.device)
+
+    # Distributed or parallel?
     if args.local_rank != -1:
         try:
             from apex.parallel import DistributedDataParallel as DDP
@@ -538,6 +565,8 @@ def main():
     elif args.n_gpu > 1:
         model = torch.nn.DataParallel(model, device_ids=device_ids)
         pooler = torch.nn.DataParallel(pooler, device_ids=device_ids)
+
+    # Log some info on the model
     logger.info("Model config: %s" % repr(model.config))
     logger.info("Nb params: %d" % count_params(model))
     if not args.mlm_only:
@@ -588,37 +617,30 @@ def main():
     # Check length of dataset
     dataset_length = len(train_dataset_spc) if train_dataset_spc is not None else len(train_dataset_mlm)
 
-    # Compute max optimization steps
-    args.max_opt_steps = args.max_train_steps // args.grad_accum_steps
-                    
-    if resuming:
-        # Make sure we haven't already done the maximum number of optimization steps
-        if checkpoint_data["global_step"] >= args.max_opt_steps:
-            msg = "We have already done %d optimization steps." % checkpoint_data["global_step"]
-            raise RuntimeError(msg)
-
-    # Initialize number of optimization steps performed
+    # Store optimization steps performed and maximum number of optimization steps 
     if not resuming:
         checkpoint_data["global_step"] = 0
-                    
+        checkpoint_data["max_opt_steps"] = args.max_train_steps // args.grad_accum_steps
+
     # Compute number of optimization steps per epoch
     num_opt_steps_per_epoch = int(dataset_length / args.train_batch_size / args.grad_accum_steps)
 
     # Compute number of epochs necessary to reach the maximum number of optimization steps
-    opt_steps_left = args.max_opt_steps - checkpoint_data["global_step"]
+    opt_steps_left = checkpoint_data["max_opt_steps"] - checkpoint_data["global_step"]
     args.num_epochs = math.ceil(opt_steps_left / num_opt_steps_per_epoch)
                     
     # Log some info before training
     logger.info("*** Training info: ***")
     logger.info("Max training steps: %d" % args.max_train_steps)
     logger.info("Gradient accumulation steps: %d" % args.grad_accum_steps)
-    logger.info("Max optimization steps: %d" % args.max_opt_steps)
+    logger.info("Max optimization steps: %d" % checkpoint_data["max_opt_steps"])
     logger.info("Dataset size: %d" % (dataset_length))
     logger.info("Batch size: %d" % args.train_batch_size)
     logger.info("# optimization steps/epoch: %d" % (num_opt_steps_per_epoch))
     logger.info("# epochs to do: %d" % (args.num_epochs))
         
     # Prepare optimizer
+    logger.info("Preparing optimizer...")
     np_list = list(model.named_parameters())
     if not args.mlm_only:
         np_list += list(pooler.named_parameters())
@@ -634,13 +656,18 @@ def main():
         optimizer.load_state_dict(checkpoint_data["optimizer_state_dict"])
 
     # Prepare scheduler
+    logger.info("Preparing learning rate scheduler...")
     scheduler = get_linear_schedule_with_warmup(optimizer,
                                                 num_warmup_steps=args.num_warmup_steps,
-                                                num_training_steps=args.max_opt_steps)
+                                                num_training_steps=checkpoint_data["max_opt_steps"])
     if resuming:
         scheduler.load_state_dict(checkpoint_data["scheduler_state_dict"])
         logger.info("Current learning rate: %f" % scheduler.get_last_lr()[0])
 
+    # Save initial training args
+    if not resuming:
+        checkpoint_data["initial_args"] = args
+    
     # Prepare training log
     time_str = datetime.now().strftime("%Y%m%d%H%M%S")
     train_log_path = os.path.join(args.output_dir, "%s.train.log" % time_str)        
