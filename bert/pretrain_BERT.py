@@ -92,7 +92,7 @@ def adjust_loss(loss, args):
     return loss
 
 
-def train_spc_and_mlm(model, pooler, tokenizer, optimizer, scheduler, dataset, args, train_log_path, checkpoint_data, mlm_dataset=None):
+def train_spc_and_mlm(model, pooler, tokenizer, optimizer, scheduler, dataset, args, checkpoint_data, mlm_dataset=None):
     """Pretrain a BertModelForMaskedLM using both sentence pair
     classification and MLM.
     
@@ -104,7 +104,6 @@ def train_spc_and_mlm(model, pooler, tokenizer, optimizer, scheduler, dataset, a
     - scheduler
     - dataset: BertDatasetForSPCandMLM
     - args
-    - train_log_path
     - checkpoint_data: dict
     - (Optional) mlm_dataset: a BertDatasetForMLM. If provided, we add
     a batch from this to every batch of the other dataset. This is
@@ -119,16 +118,11 @@ def train_spc_and_mlm(model, pooler, tokenizer, optimizer, scheduler, dataset, a
     header = "GlobalStep\tLossMLM\tAccuracyMLM\tLossSPC\tAccuracySPC"
     if mlm_dataset is not None:
         header += "\tLossExtraMLM\tAccuracyExtraMLM"
-    with open(train_log_path, "w") as f:
+    with open(args.train_log_path, "w") as f:
         f.write(header + "\n")
         
     # Start training
     logger.info("***** Running training *****")
-    logger.info("  Num examples = %d", len(dataset))
-    logger.info("  Batch size = %d", args.train_batch_size)
-    logger.info("  Num training steps = %d", args.max_train_steps)
-    logger.info("  Num accumulation steps = %d", args.grad_accum_steps)
-    logger.info("  Num optimization steps = %d", args.max_opt_steps)
     model.train()
     for epoch in trange(int(args.num_epochs), desc="Epoch"):
         # Get fresh training samples
@@ -241,7 +235,7 @@ def train_spc_and_mlm(model, pooler, tokenizer, optimizer, scheduler, dataset, a
                 optimizer.zero_grad()
                 scheduler.step()
                 checkpoint_data["global_step"] += 1
-                if checkpoint_data["global_step"] >= checkpoint_data["max_opt_steps"]:
+                if checkpoint_data["global_step"] >= args.max_opt_steps:
                     break
 
         # Compute stats for this epoch
@@ -263,7 +257,7 @@ def train_spc_and_mlm(model, pooler, tokenizer, optimizer, scheduler, dataset, a
         if mlm_dataset is not None:
             log_data.append("{:.5f}".format(avg_extra_mlm_loss))
             log_data.append("{:.5f}".format(avg_extra_mlm_acc))        
-        with open(train_log_path, "a") as f:
+        with open(args.train_log_path, "a") as f:
             f.write("\t".join(log_data)+"\n")
 
         # Save checkpoint
@@ -276,7 +270,7 @@ def train_spc_and_mlm(model, pooler, tokenizer, optimizer, scheduler, dataset, a
         checkpoint_path = os.path.join(args.output_dir, "checkpoint.tar")
         torch.save(checkpoint_data, checkpoint_path)
             
-def train_mlm(model, tokenizer, optimizer, scheduler, dataset, args, train_log_path, checkpoint_data):
+def train_mlm(model, tokenizer, optimizer, scheduler, dataset, args, checkpoint_data):
     """Pretrain a BertModelForMaskedLM using MLM only.
     
     Args:
@@ -286,21 +280,16 @@ def train_mlm(model, tokenizer, optimizer, scheduler, dataset, args, train_log_p
     - scheduler
     - dataset: BertDatasetForMLM
     - args
-    - train_log_path
+    - checkpoint_data: dict
 
     """
     # Write header in log
     header = "GlobalStep\tLossMLM\tAccuracyMLM"
-    with open(train_log_path, "w") as f:
+    with open(args.train_log_path, "w") as f:
         f.write(header + "\n")
         
     # Start training
     logger.info("***** Running training *****")
-    logger.info("  Num examples = %d", len(dataset))
-    logger.info("  Batch size = %d", args.train_batch_size)
-    logger.info("  Num training steps = %d", args.max_train_steps)
-    logger.info("  Num accumulation steps = %d", args.grad_accum_steps)
-    logger.info("  Num optimization steps = %d", args.num_optimization_steps)
     model.train()
     for epoch in trange(int(args.num_epochs), desc="Epoch"):
         # Get fresh training samples
@@ -343,7 +332,7 @@ def train_mlm(model, tokenizer, optimizer, scheduler, dataset, args, train_log_p
                 optimizer.zero_grad()
                 scheduler.step()
                 checkpoint_data["global_step"] += 1
-                if checkpoint_data["global_step"] >= checkpoint_data["max_opt_steps"]:
+                if checkpoint_data["global_step"] >= args.max_opt_steps:
                     break
         avg_loss = tr_loss / nb_tr_examples
         avg_acc = weighted_avg(accs, real_batch_sizes)
@@ -353,7 +342,7 @@ def train_mlm(model, tokenizer, optimizer, scheduler, dataset, args, train_log_p
         log_data.append(str(checkpoint_data["global_step"]))
         log_data.append("{:.5f}".format(avg_loss))
         log_data.append("{:.5f}".format(avg_acc))
-        with open(train_log_path, "a") as f:
+        with open(args.train_log_path, "a") as f:
             f.write("\t".join(log_data)+"\n")
 
         # Save checkpoint
@@ -440,17 +429,6 @@ def main():
                         help="random seed for initialization")
     args = parser.parse_args()
 
-    # Check args
-    if args.grad_accum_steps < 1:
-        raise ValueError("Invalid grad_accum_steps parameter: {}, should be >= 1".format(
-                            args.grad_accum_steps))
-    train_paths = glob.glob(os.path.join(args.dir_train_data, "*.train"))
-    assert len(train_paths) > 0
-
-    # Make output dir
-    if not os.path.exists(args.output_dir):
-        os.makedirs(args.output_dir)
-        
     # Check whether we are resuming a pretraining job from a
     # checkpoint or starting from scratch (that is, if
     # bert_model_or_config_file is a file (config) or directory
@@ -461,10 +439,25 @@ def main():
     else:
         logger.info("***** Starting pretraining job *******")
     
+    # Check args
+    if args.grad_accum_steps < 1:
+        raise ValueError("Invalid grad_accum_steps parameter: {}, should be >= 1".format(
+                            args.grad_accum_steps))
+    train_paths = glob.glob(os.path.join(args.dir_train_data, "*.train"))
+    assert len(train_paths) > 0
+    if not os.path.exists(args.output_dir):
+        os.makedirs(args.output_dir)
+    if resuming:
+        if args.learning_rate != parser.get_default("learning_rate"):
+            logger.warning("Ignoring option `learning_rate`, as we are resuming from a checkpoint, and reloading a learning rate scheduler.")
+        if args.num_warmup_steps != parser.get_default("num_warmup_steps"):
+            logger.warning("Ignoring option `num_warmup_steps`, as we are resuming from a checkpoint, and reloading a learning rate scheduler.")
+    
     # Load checkpoint, config, and tokenizer if we are resuming, otherwise load config file        
     if resuming:
         checkpoint_path = os.path.join(args.bert_model_or_config_file, "checkpoint.tar")
-        checkpoint_data = torch.load(checkpoint_path)        
+        checkpoint_data = torch.load(checkpoint_path)
+        logger.info("Resuming from global step %d" % checkpoint_data["global_step"])
         tokenizer_path = os.path.join(args.bert_model_or_config_file, "tokenizer.pkl")
         with open(tokenizer_path, "rb") as f:
             tokenizer = pickle.load(f)
@@ -473,13 +466,6 @@ def main():
     else:
         # Load config
         config = BertConfig.from_json_file(args.bert_model_or_config_file)
-
-        # Copy config in output directory
-        if os.path.exists(args.output_dir) and len(os.listdir(args.output_dir)) > 0:
-            msg = "Directory %s is not empty"
-            raise ValueError(msg)
-        config_path = os.path.join(args.output_dir, "config.json")
-        config.to_json_file(config_path)
 
         # Load tokenizer
         path_vocab = os.path.join(args.dir_train_data, "vocab.txt")
@@ -490,7 +476,14 @@ def main():
         # Adapt vocab size in config
         config.vocab_size = len(tokenizer.vocab)
         logger.info("Size of vocab: {}".format(len(tokenizer.vocab)))
-    
+
+        # Copy config in output directory
+        if len(os.listdir(args.output_dir)) > 0:
+            msg = "Directory %s is not empty"
+            raise ValueError(msg)
+        config_path = os.path.join(args.output_dir, "config.json")
+        config.to_json_file(config_path)
+        
         # Save tokenizer
         fn = os.path.join(args.output_dir, "tokenizer.pkl")
         with open(fn, "wb") as f:
@@ -523,7 +516,7 @@ def main():
     torch.manual_seed(args.seed)
     if args.n_gpu > 0:
         torch.cuda.manual_seed_all(args.seed)
-        
+                    
     # Prepare model (and pooler if we are doing SPC)
     model = BertForMaskedLM(config)
     if resuming:
@@ -591,55 +584,39 @@ def main():
                                                   encoding="utf-8",
                                                   seed=args.seed)
             assert len(train_dataset_spc) == len(train_dataset_mlm)
+                    
+    # Check length of dataset
+    dataset_length = len(train_dataset_spc) if train_dataset_spc is not None else len(train_dataset_mlm)
 
-
-    # Prepare training log
-    time_str = datetime.now().strftime("%Y%m%d%H%M%S")
-    train_log_path = os.path.join(args.output_dir, "%s.train.log" % time_str)
-
-
-
-    ########### The section I am struggling with is here. Once I am
-    ########### done with this section, I should review the training
-    ########### functions to make sure there handling of these 2
-    ########### objects is OK: args and
-    ########### checkpoint_data. 
-    
-    # Save some parameters of the training function (or load if resuming)
+    # Compute max optimization steps
+    args.max_opt_steps = args.max_train_steps // args.grad_accum_steps
+                    
     if resuming:
-        # TODO: Check all the checkpoint data defined in the else below
-        dataset_length = len(train_dataset_spc) if train_dataset_spc is not None else len(train_dataset_mlm)
-        if checkpoint_data["dataset_length"] != dataset_length:
-            msg = "Dataset length has changed. This would mess with our expectations regarding the number of optimization steps per epoch".
+        # Make sure we haven't already done the maximum number of optimization steps
+        if checkpoint_data["global_step"] >= args.max_opt_steps:
+            msg = "We have already done %d optimization steps." % checkpoint_data["global_step"]
             raise RuntimeError(msg)
-    else
-        logger.info("Dataset size: %d" % (len(train_dataset_mlm) if train_dataset_mlm else len(train_dataset_spc)))
-        checkpoint_data["training_args"] = args
-        checkpoint_data["dataset_length"] = len(train_dataset_spc) if train_dataset_spc is not None else len(train_dataset_mlm)
+
+    # Initialize number of optimization steps performed
+    if not resuming:
         checkpoint_data["global_step"] = 0
-        max_opt_steps = args.max_train_steps // args.grad_accum_steps
-        checkpoint_data["max_opt_steps"] = max_opt_steps        
-        if train_dataset_mlm is not None:
-            num_opt_steps_per_epoch = int(len(train_dataset_mlm) / args.train_batch_size / args.grad_accum_steps)
-        elif train_dataset_spc is not None:
-            num_opt_steps_per_epoch = int(len(train_dataset_spc) / args.train_batch_size / args.grad_accum_steps)
-        num_epochs = math.ceil(max_opt_steps / num_opt_steps_per_epoch)
-        checkpoint_data["num_epochs"] = num_epochs
-        logger.info("# opt. steps/epoch (with batch size = %d, # accumulation steps = %d): %d" % (args.train_batch_size,
-                                                                                                  args.grad_accum_steps,
-                                                                                                  num_opt_steps_per_epoch))
-        logger.info("# epochs (for %d steps, %d opt. steps): %d" % (args.max_train_steps, args.num_optimization_steps, args.num_epochs))
-        logger.info("Max opt. steps (for max %d steps, # acc. steps = %d): %d" % (checkpoint_data["max_train_steps"],
-                                                                                  checkpoint_data["grad_accum_steps"],
-                                                                                  checkpoint_data["max_opt_steps"]))
+                    
+    # Compute number of optimization steps per epoch
+    num_opt_steps_per_epoch = int(dataset_length / args.train_batch_size / args.grad_accum_steps)
 
-
-    #############
-    #############
-    #############
-    #############
-    #############    
-
+    # Compute number of epochs necessary to reach the maximum number of optimization steps
+    opt_steps_left = args.max_opt_steps - checkpoint_data["global_step"]
+    args.num_epochs = math.ceil(opt_steps_left / num_opt_steps_per_epoch)
+                    
+    # Log some info before training
+    logger.info("*** Training info: ***")
+    logger.info("Max training steps: %d" % args.max_train_steps)
+    logger.info("Gradient accumulation steps: %d" % args.grad_accum_steps)
+    logger.info("Max optimization steps: %d" % args.max_opt_steps)
+    logger.info("Dataset size: %d" % (dataset_length))
+    logger.info("Batch size: %d" % args.train_batch_size)
+    logger.info("# optimization steps/epoch: %d" % (num_opt_steps_per_epoch))
+    logger.info("# epochs to do: %d" % (args.num_epochs))
         
     # Prepare optimizer
     np_list = list(model.named_parameters())
@@ -658,17 +635,22 @@ def main():
 
     # Prepare scheduler
     scheduler = get_linear_schedule_with_warmup(optimizer,
-                                                num_warmup_steps=checkpoint_data["num_warmup_steps"],
-                                                num_training_steps=checkpoint_data["max_opt_steps"])
+                                                num_warmup_steps=args.num_warmup_steps,
+                                                num_training_steps=args.max_opt_steps)
     if resuming:
         scheduler.load_state_dict(checkpoint_data["scheduler_state_dict"])
+        logger.info("Current learning rate: %f" % scheduler.get_last_lr()[0])
 
+    # Prepare training log
+    time_str = datetime.now().strftime("%Y%m%d%H%M%S")
+    train_log_path = os.path.join(args.output_dir, "%s.train.log" % time_str)        
+    args.train_log_path = train_log_path
     
     # Train
     if args.mlm_only:
-        train_mlm(model, tokenizer, optimizer, scheduler, train_dataset_mlm, args, train_log_path, checkpoint_data)
+        train_mlm(model, tokenizer, optimizer, scheduler, train_dataset_mlm, args, checkpoint_data)
     else:
-        train_spc_and_mlm(model, pooler, tokenizer, optimizer, scheduler, train_dataset_spc, args, train_log_path, checkpoint_data, mlm_dataset=train_dataset_mlm)
+        train_spc_and_mlm(model, pooler, tokenizer, optimizer, scheduler, train_dataset_spc, args, checkpoint_data, mlm_dataset=train_dataset_mlm)
 
 
 if __name__ == "__main__":
