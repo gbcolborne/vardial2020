@@ -8,6 +8,7 @@ class CharTokenizer():
         Args:
 
         """
+        self.path_vocab = path_vocab
         self.vocab, self.char2count = self._init_vocab(path_vocab)
         return
 
@@ -49,7 +50,7 @@ class CharTokenizer():
         if not self.char2count:
             msg = "Provide training data when initializing tokenizer if you want to then trim the vocab."
             raise NotImplementedError(msg)
-        new_vocab = self._init_vocab()
+        new_vocab = self._init_vocab(self.path_vocab)
         new_char2count = {}
         for char in self.vocab.keys():
             if char not in new_vocab and self.char2count[char] >= min_freq:
