@@ -441,7 +441,7 @@ def main():
         assert args.output_dir is not None
         
     # Check whether we are starting from scratch, resuming from a checkpoint, or retraining a pretrained model
-    from_scratch = (not args.resume) and os.path.isdir(args.bert_model_or_config_file)
+    from_scratch = (not args.resume) and (not os.path.isdir(args.bert_model_or_config_file))
     retraining = (not args.resume) and (not from_scratch)
     
     # Load config. Load or create checkpoint data.
@@ -452,7 +452,7 @@ def main():
     elif retraining:
         logger.info("***** Starting pretraining job from pre-trained model *******")
         logger.info("Loading pretrained model...")
-        model = BertModel.from_pretrained(args.bert_model_or_config_file)
+        model = BertModelForMaskedLM.from_pretrained(args.bert_model_or_config_file)
         config = model.config
         checkpoint_data = {}
     elif args.resume:
