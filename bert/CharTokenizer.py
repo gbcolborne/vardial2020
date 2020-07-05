@@ -16,7 +16,7 @@ class CharTokenizer():
                 elems = line.rstrip().split("\t")
                 assert len(elems) == 2
                 char = elems[0]
-                self.vocab[char] = len(vocab)
+                self.vocab[char] = len(self.vocab)
                 count = int(elems[1])
                 self.char2count[char] = count
         return
