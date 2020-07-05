@@ -1,11 +1,9 @@
-# Data sub-directory
+# Sub-directories to ignore
 data/
+jobs/
 
 # Emacs backup files
 *~
-
-# Data
-train_data/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
