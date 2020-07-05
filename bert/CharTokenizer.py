@@ -9,7 +9,16 @@ class CharTokenizer():
 
         """
         self.path_vocab = path_vocab
-        self.vocab, self.char2count = self._init_vocab(path_vocab)
+        self.vocab = self._init_vocab(path_vocab)
+        self.char2count = {}
+        with open(path_vocab, encoding="utf-8") as f:
+            for line in f:
+                elems = line.rstrip().split("\t")
+                assert len(elems) == 2
+                char = elems[0]
+                self.vocab[char] = len(vocab)
+                count = int(elems[1])
+                self.char2count[char] = count
         return
 
     
@@ -21,16 +30,7 @@ class CharTokenizer():
         vocab["[CLS]"] = len(vocab)
         vocab["[SEP]"] = len(vocab)
         vocab[" "] = len(vocab)
-        char2count = {}
-        with open(path_vocab, encoding="utf-8") as f:
-            for line in f:
-                elems = line.rstrip().split("\t")
-                assert len(elems) == 2
-                char = elems[0]
-                vocab[char] = len(vocab)
-                count = int(elems[1])
-                char2count[char] = count
-        return vocab, char2count
+        return vocab
 
     
     def update_vocab(self, text):
@@ -50,9 +50,10 @@ class CharTokenizer():
         if not self.char2count:
             msg = "Provide training data when initializing tokenizer if you want to then trim the vocab."
             raise NotImplementedError(msg)
+
         new_vocab = self._init_vocab(self.path_vocab)
         new_char2count = {}
-        for char in self.vocab.keys():
+        for char in self.char2count.keys():
             if char not in new_vocab and self.char2count[char] >= min_freq:
                 new_vocab[char] = len(new_vocab)
                 new_char2count[char] = self.char2count[char]
