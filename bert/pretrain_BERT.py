@@ -490,7 +490,7 @@ def main():
     if not os.path.exists(args.output_dir):
         os.makedirs(args.output_dir)
     if (not args.resume) and len(os.listdir(args.output_dir)) > 0:
-        msg = "Directory %s is not empty"
+        msg = "Directory %s is not empty" % args.output_dir
         raise ValueError(msg)
     
     # Make or load tokenizer
