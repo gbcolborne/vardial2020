@@ -5,17 +5,19 @@ from comp_utils import ALL_LANGS
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("input_dir", help="Path of directory containing files named train.tsv and valid.tsv, and optionally test.tsv")
+    parser.add_argument("input_dir", help="Path of directory containing files named train.tsv, and optionally valid.tsv and test.tsv")
     parser.add_argument("output_dir")
     args = parser.parse_args()
 
     # Check args
-    assert "train.tsv" in os.listdir(args.input_dir) and "valid.tsv" in os.listdir(args.input_dir)
+    assert "train.tsv" in os.listdir(args.input_dir)
     if os.path.exists(args.output_dir):
         assert os.path.isdir(args.output_dir) and len(os.listdir(args.output_dir)) == 0
     else:
         os.makedirs(args.output_dir)
-    parts = ["train", "valid"]
+    parts = ["train"]
+    if "valid.tsv" in os.listdir(args.input_dir):
+        parts.append("valid")
     if "test.tsv" in os.listdir(args.input_dir):
         parts.append("test")
 
