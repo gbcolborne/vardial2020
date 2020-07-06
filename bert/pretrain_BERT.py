@@ -93,31 +93,39 @@ def adjust_loss(loss, args):
     return loss
 
 
-def train_spc_and_mlm(model, pooler, tokenizer, optimizer, scheduler, dataset, args, checkpoint_data, mlm_dataset=None):
+def train(model, pooler, tokenizer, optimizer, scheduler, dataset, args, checkpoint_data, extra_mlm_dataset=None):
     """Pretrain a BertModelForMaskedLM using both sentence pair
     classification and MLM.
     
     Args:
     - model: BertModelForMaskedLM
-    - pooler: Pooler used for SPC
+    - pooler: Pooler used for SPC (required unless args.mlm_only)
     - tokenizer: CharTokenizer
     - optimizer
     - scheduler
-    - dataset: BertDatasetForSPCandMLM
+    - dataset: BertDatasetForMLM if args.mlm_only, otherwise BertDatasetForSPCAndMLM
     - args
     - checkpoint_data: dict
-    - (Optional) mlm_dataset: a BertDatasetForMLM. If provided, we add
+    - (Optional) extra_mlm_dataset: a BertDatasetForMLM. If provided, we add
     a batch from this to every batch of the other dataset. This is
     useful for pre-training on the unlabeled test data, which we can
     not use for sentence pair classification.
 
     """
-    if mlm_dataset is not None:
-        assert len(dataset) == len(mlm_dataset)
+    if args.mlm_only:
+        assert type(dataset) == BertDatasetForMLM
+        assert extra_mlm_dataset is None
+    else:
+        assert pooler is not None
+        assert type(dataset) == BertDatasetForSPCAndMLM
+    if extra_mlm_dataset is not None:
+        assert len(dataset) == len(extra_mlm_dataset)
         
     # Write header in log
-    header = "GlobalStep\tLossMLM\tAccuracyMLM\tLossSPC\tAccuracySPC"
-    if mlm_dataset is not None:
+    header = "GlobalStep\tLossMLM\tAccuracyMLM"
+    if not args.mlm_only:
+        header += "\tLossSPC\tAccuracySPC"
+    if extra_mlm_dataset is not None:
         header += "\tLossExtraMLM\tAccuracyExtraMLM"
     with open(args.train_log_path, "w") as f:
         f.write(header + "\n")
@@ -129,13 +137,13 @@ def train_spc_and_mlm(model, pooler, tokenizer, optimizer, scheduler, dataset, a
         # Get fresh training samples
         if epoch > 0:
               dataset.resample()
-              if mlm_dataset is not None:
-                  mlm_dataset.resample()
+              if extra_mlm_dataset is not None:
+                  extra_mlm_dataset.resample()
                   
         # Make dataloader(s)
         dataloader = get_dataloader(dataset, args.train_batch_size, args.local_rank)
-        if mlm_dataset is not None:
-            mlm_dataloader = get_dataloader(mlm_dataset, args.train_batch_size, args.local_rank)
+        if extra_mlm_dataset is not None:
+            mlm_dataloader = get_dataloader(extra_mlm_dataset, args.train_batch_size, args.local_rank)
             assert len(mlm_dataloader) == len(dataloader)           
             mlm_batch_enum = enumerate(mlm_dataloader)
         
@@ -149,19 +157,26 @@ def train_spc_and_mlm(model, pooler, tokenizer, optimizer, scheduler, dataset, a
         extra_mlm_accs = []
         
         # Run training for one epoch
-        for step, batch in enumerate(tqdm(dataloader, desc="Iteration")):            
+        for step, batch in enumerate(tqdm(dataloader, desc="Iteration")):
+            # Unpack batch
             batch = tuple(t.to(args.device) for t in batch)
-            input_ids_query = batch[0]
-            input_mask_query = batch[1]
-            segment_ids_query = batch[2]
-            input_ids_cands = batch[3]
-            input_mask_cands = batch[4]
-            segment_ids_cands = batch[5]
-            cand_labels = batch[6]
-            lm_label_ids = batch[7]
+            if args.mlm_only:
+                input_ids_query = batch[0]
+                input_mask_query = batch[1]
+                segment_ids_query = batch[2]
+                lm_label_ids = batch[3]                
+            else:    
+                input_ids_query = batch[0]
+                input_mask_query = batch[1]
+                segment_ids_query = batch[2]
+                input_ids_cands = batch[3]
+                input_mask_cands = batch[4]
+                segment_ids_cands = batch[5]
+                cand_labels = batch[6]
+                lm_label_ids = batch[7]
             real_batch_sizes.append(len(input_ids_query))
 
-            # Call underlying BERT model to get encodings of query and candidates
+            # Call underlying BERT model to get encoding of query
             outputs = model.bert(input_ids=input_ids_query,
                                  attention_mask=input_mask_query,
                                  token_type_ids=segment_ids_query,
@@ -172,25 +187,25 @@ def train_spc_and_mlm(model, pooler, tokenizer, optimizer, scheduler, dataset, a
             # inputs.
             mlm_pred_scores = model.cls(query_last_hidden_states)
 
-            # Get encodings of query and candidates for SPC
-            query_encodings = pooler(query_last_hidden_states)
-            all_cand_encodings = []            
-            for i in range(2):
-                outputs = model.bert(input_ids=input_ids_cands[:,i,:],
-                                     attention_mask=input_mask_cands[:,i,:],
-                                     token_type_ids=segment_ids_cands[:,i,:],
-                                     position_ids=None)
-                last_hidden_states = outputs[0]
-                encodings = pooler(last_hidden_states)
-                all_cand_encodings.append(encodings.unsqueeze(1))
-            cand_encodings = torch.cat(all_cand_encodings, dim=1)            
+            if not args.mlm_only:
+                # Get encodings of query and candidates for SPC
+                query_encodings = pooler(query_last_hidden_states)
+                all_cand_encodings = []            
+                for i in range(2):
+                    outputs = model.bert(input_ids=input_ids_cands[:,i,:],
+                                         attention_mask=input_mask_cands[:,i,:],
+                                         token_type_ids=segment_ids_cands[:,i,:],
+                                         position_ids=None)
+                    last_hidden_states = outputs[0]
+                    encodings = pooler(last_hidden_states)
+                    all_cand_encodings.append(encodings.unsqueeze(1))
+                cand_encodings = torch.cat(all_cand_encodings, dim=1)            
 
-            # Score candidates using dot(query, candidate)
-            spc_scores = torch.bmm(cand_encodings, query_encodings.unsqueeze(2)).squeeze(2)
+                # Score candidates using dot(query, candidate)
+                spc_scores = torch.bmm(cand_encodings, query_encodings.unsqueeze(2)).squeeze(2)
 
-            # Do MLM on mlm_dataset if provided. First, upack batch
-            extra_mlm_loss = None
-            if mlm_dataset is not None:
+            if extra_mlm_dataset is not None:
+                # Do MLM on extra_mlm_dataset
                 mlm_batch_id, mlm_batch = next(mlm_batch_enum)
                 # Make sure the training steps are synced
                 assert mlm_batch_id == step
@@ -198,21 +213,22 @@ def train_spc_and_mlm(model, pooler, tokenizer, optimizer, scheduler, dataset, a
                 xinput_ids, xinput_mask, xsegment_ids, xlm_label_ids = mlm_batch
                 # Make sure the batch sizes are equal
                 assert len(xinput_ids) == len(input_ids_query)
-                outputs = model(input_ids=xinput_ids,
-                                attention_mask=xinput_mask,
-                                token_type_ids=xsegment_ids,
-                                lm_labels=xlm_label_ids,
-                                position_ids=None)
-                extra_mlm_pred_scores = outputs[1]
+                outputs = model.bert(input_ids=xinput_ids,
+                                     attention_mask=xinput_mask,
+                                     token_type_ids=xsegment_ids,
+                                     position_ids=None)
+                extra_last_hidden_states = outputs[0] # Last hidden states, shape (batch_size, seq_len, hidden_size)
+                extra_mlm_pred_scores = model.cls(extra_last_hidden_states)
                 
             # Compute loss, do backprop. Compute accuracies.
-            loss_fct = CrossEntropyLoss()
+            loss_fct = CrossEntropyLoss(reduction="mean")
             loss = loss_fct(mlm_pred_scores.view(-1, model.config.vocab_size), lm_label_ids.view(-1))
             query_mlm_losses.append(loss.item())
-            spc_loss = loss_fct(spc_scores, cand_labels)
-            loss = loss + spc_loss
-            spc_losses.append(spc_loss.item())
-            if mlm_dataset is not None:
+            if not args.mlm_only:
+                spc_loss = loss_fct(spc_scores, cand_labels)
+                loss = loss + spc_loss
+                spc_losses.append(spc_loss.item())
+            if extra_mlm_dataset is not None:
                 extra_mlm_loss = loss_fct(extra_mlm_pred_scores.view(-1, model.config.vocab_size), xlm_label_ids.view(-1))
                 loss = loss + extra_mlm_loss
                 extra_mlm_losses.append(extra_mlm_loss.item())
@@ -220,13 +236,14 @@ def train_spc_and_mlm(model, pooler, tokenizer, optimizer, scheduler, dataset, a
             # Backprop
             loss = adjust_loss(loss, args)
             loss.backward()
-
+            
             # Compute accuracies
             query_mlm_acc = accuracy(mlm_pred_scores.view(-1, model.config.vocab_size), lm_label_ids.view(-1))
             query_mlm_accs.append(query_mlm_acc)
-            spc_acc = accuracy(spc_scores, cand_labels)
-            spc_accs.append(spc_acc)
-            if mlm_dataset is not None:
+            if not args.mlm_only:
+                spc_acc = accuracy(spc_scores, cand_labels)
+                spc_accs.append(spc_acc)
+            if extra_mlm_dataset is not None:
                 extra_mlm_acc = accuracy(extra_mlm_pred_scores.view(-1, model.config.vocab_size), xlm_label_ids.view(-1))
                 extra_mlm_accs.append(extra_mlm_acc)
 
@@ -239,12 +256,14 @@ def train_spc_and_mlm(model, pooler, tokenizer, optimizer, scheduler, dataset, a
                 if checkpoint_data["global_step"] >= checkpoint_data["max_opt_steps"]:
                     break
 
+                
         # Compute stats for this epoch
-        avg_query_mlm_loss = weighted_avg(query_mlm_losses, real_batch_sizes)
+        avg_query_mlm_loss = weighted_avg(query_mlm_losses, real_batch_sizes)        
         avg_query_mlm_acc = weighted_avg(query_mlm_accs, real_batch_sizes)
-        avg_spc_loss = weighted_avg(spc_losses, real_batch_sizes)
-        avg_spc_acc = weighted_avg(spc_accs, real_batch_sizes)
-        if mlm_dataset is not None:
+        if not args.mlm_only:
+            avg_spc_loss = weighted_avg(spc_losses, real_batch_sizes)
+            avg_spc_acc = weighted_avg(spc_accs, real_batch_sizes)
+        if extra_mlm_dataset is not None:
             avg_extra_mlm_loss = weighted_avg(extra_mlm_losses, real_batch_sizes)
             avg_extra_mlm_acc = weighted_avg(extra_mlm_accs, real_batch_sizes)
         
@@ -253,9 +272,10 @@ def train_spc_and_mlm(model, pooler, tokenizer, optimizer, scheduler, dataset, a
         log_data.append(str(checkpoint_data["global_step"]))
         log_data.append("{:.5f}".format(avg_query_mlm_loss))
         log_data.append("{:.5f}".format(avg_query_mlm_acc))
-        log_data.append("{:.5f}".format(avg_spc_loss))
-        log_data.append("{:.5f}".format(avg_spc_acc))
-        if mlm_dataset is not None:
+        if not args.mlm_only:
+            log_data.append("{:.5f}".format(avg_spc_loss))
+            log_data.append("{:.5f}".format(avg_spc_acc))
+        if extra_mlm_dataset is not None:
             log_data.append("{:.5f}".format(avg_extra_mlm_loss))
             log_data.append("{:.5f}".format(avg_extra_mlm_acc))        
         with open(args.train_log_path, "a") as f:
@@ -265,94 +285,12 @@ def train_spc_and_mlm(model, pooler, tokenizer, optimizer, scheduler, dataset, a
         model_to_save = model.module if hasattr(model, 'module') else model
         pooler_to_save = pooler.module if hasattr(pooler, 'module') else pooler
         checkpoint_data['model_state_dict'] = model_to_save.state_dict()
-        checkpoint_data['pooler_state_dict'] = pooler_to_save.state_dict()
+        if not args.mlm_only:
+            checkpoint_data['pooler_state_dict'] = pooler_to_save.state_dict()
         checkpoint_data['optimizer_state_dict'] = optimizer.state_dict()        
         checkpoint_data['scheduler_state_dict'] = scheduler.state_dict()
         checkpoint_path = os.path.join(args.output_dir, "checkpoint.tar")
-        torch.save(checkpoint_data, checkpoint_path)
-            
-def train_mlm(model, tokenizer, optimizer, scheduler, dataset, args, checkpoint_data):
-    """Pretrain a BertModelForMaskedLM using MLM only.
-    
-    Args:
-    - model: BertModelForMaskedLM
-    - tokenizer: CharTokenizer
-    - optimizer
-    - scheduler
-    - dataset: BertDatasetForMLM
-    - args
-    - checkpoint_data: dict
-
-    """
-    # Write header in log
-    header = "GlobalStep\tLossMLM\tAccuracyMLM"
-    with open(args.train_log_path, "w") as f:
-        f.write(header + "\n")
-        
-    # Start training
-    logger.info("***** Running training *****")
-    model.train()
-    for epoch in trange(int(args.num_epochs), desc="Epoch"):
-        # Get fresh training samples
-        if epoch > 0:
-              dataset.resample()
-
-        # Make dataloader
-        dataloader = get_dataloader(dataset, args.train_batch_size, args.local_rank)
-
-        # Some stats for this epoch
-        tr_loss = 0
-        nb_tr_examples = 0
-        real_batch_sizes = []
-        accs = []
-        
-        # Run training for one epoch
-        for step, batch in enumerate(tqdm(dataloader, desc="Iteration")):            
-            batch = tuple(t.to(args.device) for t in batch)
-            input_ids, input_mask, segment_ids, lm_label_ids = batch
-            real_batch_sizes.append(len(input_ids))
-            
-            # Call model.
-            outputs = model(input_ids=input_ids,
-                            attention_mask=input_mask,
-                            token_type_ids=segment_ids,
-                            lm_labels=lm_label_ids,
-                            position_ids=None)
-            loss = outputs[0]
-            pred_scores = outputs[1]
-            acc = accuracy(pred_scores.view(-1, model.config.vocab_size), lm_label_ids.view(-1))
-            accs.append(acc)
-
-            # Backprop
-            loss = adjust_loss(loss, args)
-            loss.backward()
-            tr_loss += loss.item()
-            nb_tr_examples += input_ids.size(0)
-            if (step + 1) % args.grad_accum_steps == 0:
-                optimizer.step()
-                optimizer.zero_grad()
-                scheduler.step()
-                checkpoint_data["global_step"] += 1
-                if checkpoint_data["global_step"] >= checkpoint_data["max_opt_steps"]:
-                    break
-        avg_loss = tr_loss / nb_tr_examples
-        avg_acc = weighted_avg(accs, real_batch_sizes)
-        
-        # Update training log
-        log_data = []
-        log_data.append(str(checkpoint_data["global_step"]))
-        log_data.append("{:.5f}".format(avg_loss))
-        log_data.append("{:.5f}".format(avg_acc))
-        with open(args.train_log_path, "a") as f:
-            f.write("\t".join(log_data)+"\n")
-
-        # Save checkpoint
-        model_to_save = model.module if hasattr(model, 'module') else model
-        checkpoint_data['model_state_dict'] = model_to_save.state_dict()
-        checkpoint_data['optimizer_state_dict'] = optimizer.state_dict()        
-        checkpoint_data['scheduler_state_dict'] = scheduler.state_dict()
-        checkpoint_path = os.path.join(args.output_dir, "checkpoint.tar")
-        torch.save(checkpoint_data, checkpoint_path)
+        torch.save(checkpoint_data, checkpoint_path)            
 
 
 def main():
@@ -553,7 +491,9 @@ def main():
     model.to(args.device)
 
     # Prepare pooler (if we are doing SPC)
-    if not args.mlm_only:
+    if args.mlm_only:
+        pooler = None
+    else:
         pooler = Pooler(model.config.hidden_size, cls_only=(not args.avgpool_for_spc))
         if args.resume:
             pooler.load_state_dict(checkpoint_data["pooler_state_dict"])
@@ -684,10 +624,9 @@ def main():
     
     # Train
     if args.mlm_only:
-        train_mlm(model, tokenizer, optimizer, scheduler, train_dataset_mlm, args, checkpoint_data)
+        train(model, None, tokenizer, optimizer, scheduler, train_dataset_mlm, args, checkpoint_data, extra_mlm_dataset=None)
     else:
-        train_spc_and_mlm(model, pooler, tokenizer, optimizer, scheduler, train_dataset_spc, args, checkpoint_data, mlm_dataset=train_dataset_mlm)
-
+        train(model, pooler, tokenizer, optimizer, scheduler, train_dataset_spc, args, checkpoint_data, extra_mlm_dataset=train_dataset_mlm)
 
 if __name__ == "__main__":
     main()
