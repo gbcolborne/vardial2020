@@ -346,7 +346,10 @@ def main():
     parser.add_argument("--learning_rate",
                         default=1e-4,
                         type=float,
-                        help="The initial learning rate for Adam.")
+                        help="The initial learning rate for AdamW optimizer.")
+    parser.add_argument("--equal_betas",
+                        action='store_true',
+                        help="Use beta1=beta2=0.9 for AdamW optimizer.")
     parser.add_argument("--max_train_steps",
                         default=1000000,
                         type=int,
@@ -597,9 +600,13 @@ def main():
         {'params': [p for n, p in np_list if not any(nd in n for nd in no_decay)], 'weight_decay': 0.01},
         {'params': [p for n, p in np_list if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
         ]
+    if args.equal_betas:
+        betas = (0.9, 0.9)
+    else:
+        betas = (0.9, 0.999)
     optimizer = AdamW(opt_params,
                       lr=args.learning_rate,
-                      betas=(0.9, 0.999),
+                      betas=betas,
                       correct_bias=False) # To reproduce BertAdam specific behaviour, use correct_bias=False
     if args.resume:
         optimizer.load_state_dict(checkpoint_data["optimizer_state_dict"])
