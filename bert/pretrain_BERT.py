@@ -600,7 +600,7 @@ def main():
     optimizer = AdamW(opt_params,
                       lr=args.learning_rate,
                       betas=(0.9, 0.999),
-                      correct_bias=True) # To reproduce BertAdam specific behaviour, use correct_bias=False
+                      correct_bias=False) # To reproduce BertAdam specific behaviour, use correct_bias=False
     if args.resume:
         optimizer.load_state_dict(checkpoint_data["optimizer_state_dict"])
 
