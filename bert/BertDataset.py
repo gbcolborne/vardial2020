@@ -512,7 +512,7 @@ class BertDatasetForSPCAndMLM(BertDatasetForTraining):
         tokens_pos = self.tokenizer.tokenize(p)
         tokens_neg = self.tokenizer.tokenize(n)        
         example = InputExampleForSPCAndMLM(guid=example_id, tokens_query=tokens_query, tokens_pos=tokens_pos, tokens_neg=tokens_neg)
-        features = self._convert_example_to_features(example, self.seq_len, self.tokenizer)
+        features = self._convert_example_to_features(example)
         tensors = (torch.tensor(features.input_ids_query),
                    torch.tensor(features.input_mask_query),
                    torch.tensor(features.segment_ids_query),
