@@ -699,7 +699,7 @@ class BertDatasetForClassification(BertDatasetForTraining):
         text, lang = self.sampled_dataset[item]
         example_id = self.sample_counter
         self.sample_counter += 1
-        tokens = self.tokenizer.tokenize(t)
+        tokens = self.tokenizer.tokenize(text)
         example = InputExampleForMLM(guid=example_id, tokens=tokens, label=lang)
         features = self._convert_example_to_features(example)
         tensors = [torch.tensor(features.input_ids),
@@ -719,9 +719,9 @@ class BertDatasetForClassification(BertDatasetForTraining):
         """Convert a raw sample (a sentence as tokenized strings) into a
         proper training sample for classification, and optionally MLM.
         
-        :param example: InputExampleForMLM, containing sentence input as lists of tokens.
+        :param example: InputExampleForClassification, containing sentence input as lists of tokens.
 
-        :return: InputFeaturesForMLM, containing all inputs and labels of one sample as IDs (as used for model training)
+        :return: InputFeaturesForClassification, containing all inputs and labels of one sample as IDs (as used for model training)
 
         """
         tokens = example.tokens
@@ -787,10 +787,126 @@ class BertDatasetForClassification(BertDatasetForTraining):
         if not self.include_mlm:
             masked_input_ids = None
             lm_label_ids = None
-        features = InputFeaturesForMLM(input_ids=input_ids,
-                                       input_mask=input_mask,
-                                       segment_ids=segment_ids,
-                                       label_id=label_id,
-                                       masked_input_ids=masked_input_ids,
-                                       lm_label_ids=lm_label_ids)
+        features = InputFeaturesForClassification(input_ids=input_ids,
+                                                  input_mask=input_mask,
+                                                  segment_ids=segment_ids,
+                                                  label_id=label_id,
+                                                  masked_input_ids=masked_input_ids,
+                                                  lm_label_ids=lm_label_ids)
+        return features
+
+
+class BertDatasetForTesting(Dataset):
+    """ A class for evaluating classification on dev or test sets. """
+    
+    def __init__(self, path_data, tokenizer, label2id, seq_len, encoding="utf-8"):
+        """ Constructor.
+
+        Args:
+        - path_data: path of a file in TSV format, with one or 2 columns, containing texts and optional labels.
+        - tokenizer:
+        - label2id: dict that maps labels2ids
+
+        """
+        self.path_data = path_data
+        self.tokenizer = tokenizer
+        self.label2id = label2id
+        self.seq_len = seq_len
+        self.encoding = encoding
+        self.data = []
+        
+        # Load data
+        with open(self.path_data, encoding=self.encoding) as f:
+            for line in f:
+                elems = line.strip().split("\t")
+                if len(elems) == 0:
+                    # Empty line
+                    continue
+                elif len(elems) == 1:
+                    text = elems[0]
+                    label = None
+                elif len(elems) == 2:
+                    text = elems[0]
+                    label = elems[1]
+                else:
+                    msg = "invalid number of columns (%d)" % len(elems)
+                    raise RuntimeError(msg)
+                self.data.append((text, label))
+                    
+    def __len__(self):
+        return self.data
+
+    
+    def __getitem__(self, item):
+        text, label = self.sampled_dataset[item]
+        example_id = item
+        tokens = self.tokenizer.tokenize(text)
+        example = InputExampleForClassification(guid=example_id, tokens=tokens, label=label)
+        features = self._convert_example_to_features(example)
+        tensors = [torch.tensor(features.input_ids),
+                   torch.tensor(features.input_mask),
+                   torch.tensor(features.segment_ids),
+                   torch.tensor(features.label_id)]
+        if self.include_mlm:
+            tensors.append(None)
+            tensors.append(None)
+        else:
+            tensors.append(torch.tensor(features.masked_input_ids))
+            tensors.append(torch.tensor(features.lm_label_ids))
+        return tensors
+
+
+    def _convert_example_to_features(self, example):
+        """Convert a raw sample (a sentence as tokenized strings) into a
+        proper training sample for classification.
+        
+        :param example: InputExampleForClassification.
+
+        :return: InputFeaturesForClassification.
+
+        """
+        tokens = example.tokens
+        label = example.label
+        
+        # Truncate sequence if necessary. Account for [CLS] and [SEP] by subtracting 2.
+        tokens = tokens[:self.seq_len-2]
+
+        # Add CLS and SEP
+        tokens = ["[CLS]"] + tokens + ["[SEP]"]
+        
+        # Get input token IDs (unpadded)
+        input_ids = self.tokenizer.convert_tokens_to_ids(tokens)
+            
+        # Zero-pad input token IDs
+        input_ids += [0] * (self.seq_len - len(tokens))
+
+        # Make input mask (1 for real tokens and 0 for padding tokens)
+        input_mask = [1] * len(tokens) + [0] * (self.seq_len - len(tokens))
+    
+        # Make segment IDs (padded)
+        segment_ids = [0] * self.seq_len
+
+        # Get label ID
+        label_id = self.label2id[label]
+        
+        # Check data
+        assert len(input_ids) == self.seq_len
+        assert len(input_mask) == self.seq_len
+        assert len(segment_ids) == self.seq_len
+        
+        if example.guid < 5:
+            logger.info("*** Example ***")
+            logger.info("guid: {}".format(example.guid))
+            logger.info("tokens: {}".format(tokens))
+            logger.info("input_ids: {}".format(input_ids))
+            logger.info("input_mask: {}".format(input_mask))
+            logger.info("segment_ids: {}".format(segment_ids))
+            logger.info("label: {}".format(label))
+            logger.info("label_id: {}".format(label_id))
+
+        # Get features
+        features = InputFeaturesForClassification(input_ids=input_ids,
+                                                  input_mask=input_mask,
+                                                  segment_ids=segment_ids,
+                                                  label_id=label_id)
         return features
