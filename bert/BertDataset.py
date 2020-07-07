@@ -845,14 +845,11 @@ class BertDatasetForTesting(Dataset):
         features = self._convert_example_to_features(example)
         tensors = [torch.tensor(features.input_ids),
                    torch.tensor(features.input_mask),
-                   torch.tensor(features.segment_ids),
-                   torch.tensor(features.label_id)]
-        if self.include_mlm:
-            tensors.append(None)
+                   torch.tensor(features.segment_ids)]
+        if label is None:
             tensors.append(None)
         else:
-            tensors.append(torch.tensor(features.masked_input_ids))
-            tensors.append(torch.tensor(features.lm_label_ids))
+            tensors.append(torch.tensor(features.label_id))
         return tensors
 
 
@@ -887,7 +884,10 @@ class BertDatasetForTesting(Dataset):
         segment_ids = [0] * self.seq_len
 
         # Get label ID
-        label_id = self.label2id[label]
+        if label is None:
+            label_id is None
+        else:
+            label_id = self.label2id[label]
         
         # Check data
         assert len(input_ids) == self.seq_len
