@@ -96,7 +96,7 @@ def mask_random_tokens(tokens, tokenizer):
     return tokens, output_label
 
 
-class BertDataset(Dataset):
+class BertDatasetForPretraining(Dataset):
 
     """ Abstract class, subclassed by BertDatasetForSPCAndMLM, BertDatasetForMLM, etc. These must implement `__getitem__`, as well as `resample`. """
 
@@ -253,7 +253,7 @@ class InputFeaturesForMLM(object):
         self.lm_label_ids = lm_label_ids # List containing LM label IDs 
     
     
-class BertDatasetForMLM(BertDataset):
+class BertDatasetForMLM(BertDatasetForPretraining):
     
     def __init__(self, train_paths, tokenizer, seq_len, unk_only=False, sampling_distro="uniform", encoding="utf-8", seed=None):
         # Init parent class
@@ -399,7 +399,7 @@ class InputFeaturesForSPCAndMLM(object):
         self.lm_label_ids_query = lm_label_ids_query # List containing LM label IDs of query
 
 
-class BertDatasetForSPCAndMLM(BertDataset):
+class BertDatasetForSPCAndMLM(BertDatasetForPretraining):
     
     def __init__(self, train_paths, tokenizer, seq_len, sampling_distro="uniform", encoding="utf-8", seed=None):
         size = REL_SAMPLE_SIZE + CON_SAMPLE_SIZE + IRR_SAMPLE_SIZE
