@@ -373,6 +373,9 @@ def main():
     parser.add_argument("--equal_betas",
                         action='store_true',
                         help="Use beta1=beta2=0.9 for AdamW optimizer.")
+    parser.add_argument("--correct_bias",
+                        action='store_true',
+                        help="Correct bias in AdamW optimizer (correct_bias=False is meant to reproduce BERT behaviour exactly.")
     parser.add_argument("--max_train_steps",
                         default=1000000,
                         type=int,
@@ -630,7 +633,7 @@ def main():
     optimizer = AdamW(opt_params,
                       lr=args.learning_rate,
                       betas=betas,
-                      correct_bias=False) # To reproduce BertAdam specific behaviour, use correct_bias=False
+                      correct_bias=args.correct_bias) # To reproduce BertAdam specific behaviour, use correct_bias=False
     if args.resume:
         optimizer.load_state_dict(checkpoint_data["optimizer_state_dict"])
 
