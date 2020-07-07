@@ -32,7 +32,18 @@ def main():
     
     # Check args
     assert args.do_train or args.do_eval or args.do_pred
-
-
+    if args.eval_during_training:
+        assert args.do_train
+    if args.do_train:
+        path_train_data = os.path.join(args.dir_data, "train.tsv")
+        assert os.path.exists(path_train_data)
+    if args.do_eval or args.eval_during_training:
+        path_dev_data = os.path.join(args.dir_data, "valid.tsv")        
+        assert os.path.exists(path_dev_data)
+    if args.do_pred:
+        path_test_data = os.path.join(args.dir_data, "test.tsv")        
+        assert os.path.exists(path_test_data)
+        
+        
 if __name__ == "__main__":
     main()
