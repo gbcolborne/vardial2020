@@ -127,9 +127,10 @@ def train(model, pooler, tokenizer, optimizer, scheduler, dataset, args, checkpo
         header += "\tLossSPC\tAccuracySPC"
     if extra_mlm_dataset is not None:
         header += "\tLossExtraMLM\tAccuracyExtraMLM"
+    header += "\tGradNorm\tWeightNorm"
     with open(args.train_log_path, "w") as f:
         f.write(header + "\n")
-        
+    
     # Start training
     logger.info("***** Running training *****")
     model.train()
@@ -155,6 +156,7 @@ def train(model, pooler, tokenizer, optimizer, scheduler, dataset, args, checkpo
         spc_accs = []
         extra_mlm_losses = []
         extra_mlm_accs = []
+        grad_norms = []
         
         # Run training for one epoch
         for step, batch in enumerate(tqdm(dataloader, desc="Iteration")):
@@ -237,6 +239,17 @@ def train(model, pooler, tokenizer, optimizer, scheduler, dataset, args, checkpo
             loss = adjust_loss(loss, args)
             loss.backward()
             
+            # Compute norm of gradient
+            training_grad_norm = 0
+            for param in model.parameters():
+                if param.grad is not None:
+                    training_grad_norm += torch.norm(param.grad, p=2).item()
+            if not args.mlm_only:
+                for param in pooler.parameters():
+                    if param.grad is not None:
+                        training_grad_norm += torch.norm(param.grad, p=2).item()
+            grad_norms.append(training_grad_norm)
+
             # Compute accuracies
             query_mlm_acc = accuracy(mlm_pred_scores.view(-1, model.config.vocab_size), lm_label_ids.view(-1))
             query_mlm_accs.append(query_mlm_acc)
@@ -255,9 +268,9 @@ def train(model, pooler, tokenizer, optimizer, scheduler, dataset, args, checkpo
                 checkpoint_data["global_step"] += 1
                 if checkpoint_data["global_step"] >= checkpoint_data["max_opt_steps"]:
                     break
-
                 
         # Compute stats for this epoch
+        last_grad_norm = grad_norms[-1]
         avg_query_mlm_loss = weighted_avg(query_mlm_losses, real_batch_sizes)        
         avg_query_mlm_acc = weighted_avg(query_mlm_accs, real_batch_sizes)
         if not args.mlm_only:
@@ -266,7 +279,15 @@ def train(model, pooler, tokenizer, optimizer, scheduler, dataset, args, checkpo
         if extra_mlm_dataset is not None:
             avg_extra_mlm_loss = weighted_avg(extra_mlm_losses, real_batch_sizes)
             avg_extra_mlm_acc = weighted_avg(extra_mlm_accs, real_batch_sizes)
-        
+
+        # Compute norm of model weights
+        weight_norm = 0
+        for param in model.parameters():
+            weight_norm += torch.norm(param.data, p=2).item()
+        if not args.mlm_only:
+            for param in pooler.parameters():
+                weight_norm += torch.norm(param.data, p=2).item()
+            
         # Write stats for this epoch in log
         log_data = []
         log_data.append(str(checkpoint_data["global_step"]))
@@ -277,7 +298,9 @@ def train(model, pooler, tokenizer, optimizer, scheduler, dataset, args, checkpo
             log_data.append("{:.5f}".format(avg_spc_acc))
         if extra_mlm_dataset is not None:
             log_data.append("{:.5f}".format(avg_extra_mlm_loss))
-            log_data.append("{:.5f}".format(avg_extra_mlm_acc))        
+            log_data.append("{:.5f}".format(avg_extra_mlm_acc))
+        log_data.append("{:.5f}".format(last_grad_norm))
+        log_data.append("{:.5f}".format(weight_norm))        
         with open(args.train_log_path, "a") as f:
             f.write("\t".join(log_data)+"\n")
 
