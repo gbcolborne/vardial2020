@@ -6,7 +6,7 @@ from datetime import datetime
 import numpy as np
 import torch
 from torch.nn import CrossEntropyLoss
-from torch.utils.data import DataLoader, RandomSampler
+from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
 from torch.utils.data.distributed import DistributedSampler
 from transformers import BertForMaskedLM, BertConfig
 from transformers import AdamW
@@ -14,6 +14,7 @@ from transformers.optimization import get_linear_schedule_with_warmup
 from CharTokenizer import CharTokenizer
 from BertDataset import BertDatasetForClassification, BertDatasetForMLM, BertDatasetForTesting
 from Pooler import Pooler
+from Classifier import Classifier
 sys.path.append("..")
 from comp_utils import ALL_LANGS
 
@@ -24,11 +25,40 @@ logging.basicConfig(format='%(asctime)s - %(levelname)s - %(name)s -   %(message
 logger = logging.getLogger(__name__)
 
 
+def get_dataloader(dataset, batch_size, local_rank, shuffle=True):
+    if local_rank == -1:
+        if shuffle:            
+            sampler = RandomSampler(dataset)
+        else:
+            sampler = SequentialSampler(dataset)            
+    else:
+        sampler = DistributedSampler(dataset, shuffle=shuffle)
+    return DataLoader(dataset, sampler=sampler, batch_size=batch_size)
+
+
 def count_params(model):
     count = 0
     for p in model.parameters():
          count += torch.prod(torch.tensor(p.size())).item()
     return count
+
+
+def weighted_avg(vals, weights):
+    vals = np.asarray(vals)
+    weights = np.asarray(weights)
+    assert len(vals.shape) == 1
+    assert vals.shape == weights.shape
+    probs = weights / weights.sum()
+    return np.sum(vals * probs)    
+
+
+def adjust_loss(loss, args):
+    # Adapt loss for distributed training or gradient accumulation
+    if args.n_gpu > 1:
+        loss = loss.mean() # mean() to average on multi-gpu.
+    if args.grad_accum_steps > 1:
+        loss = loss / args.grad_accum_steps
+    return loss
 
 
 def check_for_unk_train_data(train_paths):
@@ -38,12 +68,13 @@ def check_for_unk_train_data(train_paths):
     return None
 
 
-def train(model, pooler, optimizer, scheduler, train_dataset, args, unk_dataset=None):
+def train(model, pooler, classifer, optimizer, scheduler, train_dataset, args, unk_dataset=None):
     """ Train model. 
 
     Args:
     - model: BertModelForMaskedLM
     - pooler: Pooler
+    - classifier: Classifier
     - optimizer
     - scheduler
     - train_dataset: BertDatasetForClassification
@@ -65,13 +96,170 @@ def train(model, pooler, optimizer, scheduler, train_dataset, args, unk_dataset=
     
     # Write header in log
     header = "GlobalStep\tLossLangID\tAccuracyLangID\tLossMLM\tAccuracyMLM"
-    if unkdataset is not None:
+    if unk_dataset is not None:
         header += "\tLossUnkMLM\tAccuracyUnkMLM"
     header += "\tGradNorm\tWeightNorm"
     with open(args.train_log_path, "w") as f:
         f.write(header + "\n")
 
     # Start training
+    logger.info("***** Running training *****")
+    model.train()
+    for epoch in trange(int(args.num_epochs), desc="Epoch"):
+        # Get fresh training samples
+        if epoch > 0:
+              train_dataset.resample()
+              if unk_dataset is not None:
+                  unk_dataset.resample()
+                  
+        # Make dataloader(s)
+        train_dataloader = get_dataloader(train_dataset, args.train_batch_size, args.local_rank, shuffle=True)
+        if unk_dataset is not None:
+            unk_dataloader = get_dataloader(unk_dataset, args.train_batch_size, args.local_rank, shuffle=True)
+            assert len(unk_dataloader) == len(train_dataloader)           
+            unk_batch_enum = enumerate(unk_dataloader)
+        
+        # Some stats for this epoch
+        real_batch_sizes = []
+        lid_losses = []
+        lid_accs = []
+        mlm_losses = []
+        mlm_accs = []
+        unk_mlm_losses = []
+        unk_mlm_accs = []
+        grad_norms = []
+        
+        # Run training for one epoch
+        for step, batch in enumerate(tqdm(train_dataloader, desc="Iteration")):
+            # Unpack batch
+            batch = tuple(t.to(args.device) for t in batch)
+            input_ids = batch[0]
+            input_mask = batch[1]
+            segment_ids = batch[2]
+            label_ids = batch[3]
+            masked_input_ids = batch[4]
+            lm_label_ids = batch[5]                
+            real_batch_sizes.append(len(input_ids))
+
+            # Call BERT encoder to get encoding of (un-masked) input sequences
+            lid_outputs = model.bert(input_ids=input_ids,
+                                     attention_mask=input_mask,
+                                     token_type_ids=segment_ids,
+                                     position_ids=None)
+            lid_last_hidden_states = outputs[0] # Last hidden states, shape (batch_size, seq_len, hidden_size)
+
+            # Do classification (i.e. language identification)
+            lid_encodings = pooler(lid_last_hidden_states)
+            lid_scores = classifier(lid_encodings)
+
+            # Call BERT encoder to get encoding of masked input sequences
+            mlm_outputs = model.bert(input_ids=masked_input_ids,
+                                     attention_mask=input_mask,
+                                     token_type_ids=segment_ids,
+                                     position_ids=None)
+            mlm_last_hidden_states = outputs[0] # Last hidden states, shape (batch_size, seq_len, hidden_size)
+
+            # Do MLM on last hidden states
+            mlm_pred_scores = model.cls(mlm_last_hidden_states)
+
+            # Do MLM on unk_dataset if present
+            if unk_dataset is not None:
+                unk_batch_id, unk_batch = next(unk_batch_enum)
+                # Make sure the training steps are synced
+                assert unk_batch_id == step
+                unk_batch = tuple(t.to(args.device) for t in unk_batch)
+                xinput_ids, xinput_mask, xsegment_ids, xlm_label_ids = unk_batch
+                # Make sure the batch sizes are equal
+                assert len(xinput_ids) == len(input_ids)
+                outputs = model.bert(input_ids=xinput_ids,
+                                     attention_mask=xinput_mask,
+                                     token_type_ids=xsegment_ids,
+                                     position_ids=None)
+                unk_last_hidden_states = outputs[0] # Last hidden states, shape (batch_size, seq_len, hidden_size)
+                unk_mlm_pred_scores = model.cls(unk_last_hidden_states)
+
+            # Compute loss, do backprop. Compute accuracies.
+            loss_fct = CrossEntropyLoss(reduction="mean")
+            loss = loss_fct(lid_scores, label_ids)
+            lid_losses.append(loss.item())
+            mlm_loss = loss_fct(mlm_pred_scores.view(-1, model.config.vocab_size), lm_label_ids.view(-1))
+            mlm_losses.append(mlm_loss.item())
+            loss = loss + mlm_loss
+            if unk_dataset is not None:
+                unk_mlm_loss = loss_fct(unk_mlm_pred_scores.view(-1, model.config.vocab_size), xlm_label_ids.view(-1))
+                loss = loss + unk_mlm_loss
+                unk_mlm_losses.append(unk_mlm_loss.item())
+
+            # Backprop
+            loss = adjust_loss(loss, args)
+            loss.backward()
+            
+            # Compute norm of gradient
+            training_grad_norm = 0
+            for param in model.parameters() + pooler.parameter() + classifier.parameters()
+                if param.grad is not None:
+                    training_grad_norm += torch.norm(param.grad, p=2).item()
+            grad_norms.append(training_grad_norm)
+
+            # Compute accuracies
+            lid_acc = accuracy(lid_scores, label_ids)
+            lid_accs.append(lid_acc)
+            mlm_acc = accuracy(mlm_pred_scores.view(-1, model.config.vocab_size), lm_label_ids.view(-1))
+            mlm_accs.append(query_mlm_acc)
+            if unk_dataset is not None:
+                unk_mlm_acc = accuracy(unk_mlm_pred_scores.view(-1, model.config.vocab_size), xlm_label_ids.view(-1))
+                unk_mlm_accs.append(unk_mlm_acc)
+
+            # Check if we accumulate grad or do an optimization step
+            if (step + 1) % args.grad_accum_steps == 0:
+                optimizer.step()
+                optimizer.zero_grad()
+                scheduler.step()
+                checkpoint_data["global_step"] += 1
+                if checkpoint_data["global_step"] >= checkpoint_data["max_opt_steps"]:
+                    break
+                
+        # Compute stats for this epoch
+        last_grad_norm = grad_norms[-1]
+        avg_lid_loss = weighted_avg(lid_losses, real_batch_sizes)
+        avg_lid_acc = weighted_avg(lid_accs, real_batch_sizes)
+        avg_mlm_loss = weighted_avg(mlm_losses, real_batch_sizes)        
+        avg_mlm_acc = weighted_avg(mlm_accs, real_batch_sizes)
+        if unk_dataset is not None:
+            avg_unk_mlm_loss = weighted_avg(unk_mlm_losses, real_batch_sizes)
+            avg_unk_mlm_acc = weighted_avg(unk_mlm_accs, real_batch_sizes)
+
+        # Compute norm of model weights
+        weight_norm = 0
+        for param in model.parameters() + pooler.parameters() + classifier.parameters():
+            weight_norm += torch.norm(param.data, p=2).item()
+            
+        # Write stats for this epoch in log
+        log_data = []
+        log_data.append(str(checkpoint_data["global_step"]))
+        log_data.append("{:.5f}".format(avg_lid_loss))
+        log_data.append("{:.5f}".format(avg_lid_acc))
+        log_data.append("{:.5f}".format(avg_mlm_loss))
+        log_data.append("{:.5f}".format(avg_mlm_acc))
+        if unk_dataset is not None:
+            log_data.append("{:.5f}".format(avg_unk_mlm_loss))
+            log_data.append("{:.5f}".format(avg_unk_mlm_acc))
+        log_data.append("{:.5f}".format(last_grad_norm))
+        log_data.append("{:.5f}".format(weight_norm))        
+        with open(args.train_log_path, "a") as f:
+            f.write("\t".join(log_data)+"\n")
+
+        # Save checkpoint
+        model_to_save = model.module if hasattr(model, 'module') else model
+        pooler_to_save = pooler.module if hasattr(pooler, 'module') else pooler
+        classifier_to_save = classifier.module if hasattr(classifier, 'module') else classifier        
+        checkpoint_data['model_state_dict'] = model_to_save.state_dict()
+        checkpoint_data['pooler_state_dict'] = pooler_to_save.state_dict()
+        checkpoint_data['classifier_state_dict'] = classifier_to_save.state_dict()        
+        checkpoint_data['optimizer_state_dict'] = optimizer.state_dict()        
+        checkpoint_data['scheduler_state_dict'] = scheduler.state_dict()
+        checkpoint_path = os.path.join(args.output_dir, "checkpoint.tar")
+        torch.save(checkpoint_data, checkpoint_path)            
 
         
 def main():
@@ -223,45 +411,6 @@ def main():
     if not args.do_train:
         assert lang2id is not None
     
-    # Load config
-    logger.info("Loading config...")
-    config_path = os.path.join(args.dir_pretrained_model, "config.json")
-    config = BertConfig.from_json_file(config_path)        
-
-    # Create model and load pre-trained weigths
-    logger.info("Loading model...")
-    model = BertForMaskedLM(config)
-    model.load_state_dict(checkpoint_data["model_state_dict"])
-    model.to(args.device)
-    
-    # Create pooler and load pretrained weights
-    if "pooler_state_dict" in checkpoint_data:
-        logger.info("Loading pooler...")
-    else:
-        logger.info("Making pooler...")
-    pooler = Pooler(model.config.hidden_size, cls_only=(not args.avgpool))
-    if "pooler_state_dict" in checkpoint_data:
-        pooler.load_state_dict(checkpoint_data["pooler_state_dict"])
-    pooler.to(args.device)
-
-    # Distributed or parallel?
-    if args.local_rank != -1:
-        try:
-            from apex.parallel import DistributedDataParallel as DDP
-        except ImportError:
-            raise ImportError("Please install apex from https://www.github.com/nvidia/apex to use distributed training.")
-        model = DDP(model)
-        pooler = DDP(pooler) 
-    elif args.n_gpu > 1:
-        model = torch.nn.DataParallel(model, device_ids=device_ids)
-        pooler = torch.nn.DataParallel(pooler, device_ids=device_ids)
-
-    # Log some info on the model
-    logger.info("Model config: %s" % repr(model.config))
-    logger.info("Nb params: %d" % count_params(model))
-    logger.info("Nb params in pooler: %d" % count_params(pooler))        
-
-    
     # Load tokenizer
     logger.info("Loading tokenizer...")
     tokenizer_path = os.path.join(args.dir_pretrained_model, "tokenizer.pkl")
@@ -322,6 +471,56 @@ def main():
                                              require_labels=False,
                                              encoding="utf-8")
 
+    # Load model config
+    logger.info("Loading config...")
+    config_path = os.path.join(args.dir_pretrained_model, "config.json")
+    config = BertConfig.from_json_file(config_path)        
+
+    # Create model and load pre-trained weigths
+    logger.info("Loading model...")
+    model = BertForMaskedLM(config)
+    model.load_state_dict(checkpoint_data["model_state_dict"])
+    model.to(args.device)
+        
+
+    # Create pooler and classifier, load pretrained weights if present
+    if "pooler_state_dict" in checkpoint_data:
+        logger.info("Loading pooler...")
+    else:
+        logger.info("Making pooler...")
+    pooler = Pooler(model.config.hidden_size, cls_only=(not args.avgpool))
+    if "pooler_state_dict" in checkpoint_data:
+        pooler.load_state_dict(checkpoint_data["pooler_state_dict"])
+    pooler.to(args.device)
+    if "classifier_state_dict" in checkpoint_data:
+        logger.info("Loading classifier...")
+    else:
+        logger.info("Making classifier...")
+    classifier = Classifier(model.config.hidden_size, len(lang2id))
+    if "classifier_state_dict" in checkpoint_data:
+        classifier.load_state_dict(checkpoint_data["classifier_state_dict"])
+    classifier.to(args.device)
+
+    # Distributed or parallel?
+    if args.local_rank != -1:
+        try:
+            from apex.parallel import DistributedDataParallel as DDP
+        except ImportError:
+            raise ImportError("Please install apex from https://www.github.com/nvidia/apex to use distributed training.")
+        model = DDP(model)
+        pooler = DDP(pooler)
+        classifier = DDP(classifier)
+    elif args.n_gpu > 1:
+        model = torch.nn.DataParallel(model, device_ids=device_ids)
+        pooler = torch.nn.DataParallel(pooler, device_ids=device_ids)
+        classifier = torch.nn.DataParallel(classifier, device_ids=device_ids)
+
+    # Log some info on the model
+    logger.info("Model config: %s" % repr(model.config))
+    logger.info("Nb params: %d" % count_params(model))
+    logger.info("Nb params in pooler: %d" % count_params(pooler))        
+    logger.info("Nb params in classifier: %d" % count_params(classifier))
+        
     # Training
     if args.do_train:
         # Prepare optimizer and scheduler
@@ -368,7 +567,7 @@ def main():
         args.train_log_path = train_log_path
 
         # Run training
-        train(model, pooler, optimizer, scheduler, train_dataset, args, unk_dataset=unk_dataset)
+        train(model, pooler, classifier, optimizer, scheduler, train_dataset, args, unk_dataset=unk_dataset)
 
     if args.do_eval:
         pass
