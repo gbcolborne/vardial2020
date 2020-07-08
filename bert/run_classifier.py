@@ -1,6 +1,6 @@
 """ Train or evaluate classifier. """
 
-import sys, os, argparse, glob, pickle, random, logging
+import sys, os, argparse, glob, pickle, random, logging, datetime
 from io import open
 import numpy as np
 import torch
@@ -21,6 +21,13 @@ logging.basicConfig(format='%(asctime)s - %(levelname)s - %(name)s -   %(message
                     datefmt='%m/%d/%Y %H:%M:%S',
                     level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+def count_params(model):
+    count = 0
+    for p in model.parameters():
+         count += torch.prod(torch.tensor(p.size())).item()
+    return count
 
 
 def check_for_unk_train_data(train_paths):
@@ -183,6 +190,36 @@ def main():
     model.load_state_dict(checkpoint_data["model_state_dict"])
     model.to(args.device)
     
+    # Create pooler and load pretrained weights
+    if "pooler_state_dict" in checkpoint_data:
+        logger.info("Loading pooler...")
+    else:
+        logger.info("Making pooler...")
+    pooler = Pooler()
+    if "pooler_state_dict" in checkpoint_data:
+        pooler.load_state_dict(checkpoint_data["pooler_state_dict"])
+    pooler.to(args.device)
+
+    # Distributed or parallel?
+    if args.local_rank != -1:
+        try:
+            from apex.parallel import DistributedDataParallel as DDP
+        except ImportError:
+            raise ImportError("Please install apex from https://www.github.com/nvidia/apex to use distributed training.")
+        model = DDP(model)
+        if not args.mlm_only:
+            pooler = DDP(pooler) 
+    elif args.n_gpu > 1:
+        model = torch.nn.DataParallel(model, device_ids=device_ids)
+        pooler = torch.nn.DataParallel(pooler, device_ids=device_ids)
+
+    # Log some info on the model
+    logger.info("Model config: %s" % repr(model.config))
+    logger.info("Nb params: %d" % count_params(model))
+    if not args.mlm_only:
+        logger.info("Nb params in pooler: %d" % count_params(pooler))        
+
+    
     # Load tokenizer
     logger.info("Loading tokenizer...")
     tokenizer_path = os.path.join(args.dir_pretrained_model, "tokenizer.pkl")
@@ -190,27 +227,33 @@ def main():
         tokenizer = pickle.load(f)
 
     # Get data
+    max_seq_length = args.seq_len + 2 # We add 2 for CLS and SEP
     if args.do_train:
         # Remove unk.train if present, and create a MLM dataset for it.
         path_unk = check_for_unk_train_data(train_paths)
-        if path_unk is not None:
+        if path_unk is None:
+            unk_dataset = None
+        else:
             train_paths.remove(path_unk)
             logger.info("Loading MLM-only data from %s..." % path_unk)            
-            dataset_unk = BertDatasetForMLM([path_unk],
+            unk_dataset = BertDatasetForMLM([path_unk],
                                             tokenizer,
-                                            seq_len=args.seq_len+2,
+                                            seq_len=max_seq_length,
                                             unk_only=True,
                                             sampling_distro=args.sampling_distro,
                                             encoding="utf-8",
                                             seed=args.seed)
+
         logger.info("Loading training data from %s training files in %s..." % (len(train_paths),args.dir_data))
         train_dataset = BertDatasetForClassification(train_paths,
                                                      tokenizer,
-                                                     args.seq_len+2,
+                                                     max_seq_length,
                                                      include_mlm=True,
                                                      sampling_distro=args.sampling_distro,
                                                      encoding="utf-8",
                                                      seed=args.seed)
+        if path_unk is not None:
+            assert len(unk_dataset) == len(train_dataset)
         lang2id = train_dataset.lang2id
         # Check lang2id: keys should contain all langs, and nothing else
         assert all(k in lang2id for k in ALL_LANGS)
@@ -225,7 +268,7 @@ def main():
         dev_dataset = BertDatasetForTesting(path_dev_data,
                                             tokenizer,
                                             lang2id,
-                                            args.seq_len+2,
+                                            max_seq_length,
                                             require_labels=True,
                                             encoding="utf-8")
     if args.do_pred:
@@ -233,9 +276,62 @@ def main():
         test_dataset = BertDatasetForTesting(path_test_data,
                                              tokenizer,
                                              lang2id,
-                                             args.seq_len+2,
+                                             max_seq_length,
                                              require_labels=False,
                                              encoding="utf-8")
+
+    # Training
+    if args.do_train:
+        # Prepare optimizer and scheduler
+        checkpoint_data["global_step"] = 0
+        checkpoint_data["max_opt_steps"] = args.max_train_steps // args.grad_accum_steps
+        num_opt_steps_per_epoch = int(len(train_dataset) / args.train_batch_size / args.grad_accum_steps)
+        args.num_epochs = math.ceil(checkpoint_data["max_opt_steps"] / num_opt_steps_per_epoch)
+        logger.info("Preparing optimizer...")
+        np_list = list(model.named_parameters())
+        np_list += list(pooler.named_parameters())
+        no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
+        opt_params = [
+            {'params': [p for n, p in np_list if not any(nd in n for nd in no_decay)], 'weight_decay': 0.01},
+            {'params': [p for n, p in np_list if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
+        ]
+        if args.equal_betas:
+            betas = (0.9, 0.9)
+        else:
+            betas = (0.9, 0.999)
+        optimizer = AdamW(opt_params,
+                          lr=args.learning_rate,
+                          betas=betas,
+                          correct_bias=args.correct_bias) # To reproduce BertAdam specific behaviour, use correct_bias=False
+        logger.info("Preparing learning rate scheduler...")
+        scheduler = get_linear_schedule_with_warmup(optimizer,
+                                                    num_warmup_steps=args.num_warmup_steps,
+                                                    num_training_steps=checkpoint_data["max_opt_steps"])
+
+        # Log some info before training
+        logger.info("*** Training info: ***")
+        logger.info("Max training steps: %d" % args.max_train_steps)
+        logger.info("Gradient accumulation steps: %d" % args.grad_accum_steps)
+        logger.info("Max optimization steps: %d" % checkpoint_data["max_opt_steps"])
+        logger.info("Training dataset size: %d" % len(train_dataset))
+        logger.info("Batch size: %d" % args.train_batch_size)
+        logger.info("# optimization steps/epoch: %d" % num_opt_steps_per_epoch)
+        logger.info("# epochs to do: %d" % args.num_epochs)
+        if args.eval_during_training:
+            logger.info("Validation dataset size: %d" % len(dev_dataset))
+
+        # Prepare training log file
+        time_str = datetime.now().strftime("%Y%m%d%H%M%S")
+        train_log_path = os.path.join(args.output_dir, "%s.train.log" % time_str)        
+        args.train_log_path = train_log_path
+
+        # Run training
+        train(model, pooler, optimizer, scheduler, train_dataset, args, unk_dataset=unk_dataset)
+
+    if args.do_eval:
+        pass
+    if args.do_pred:
+        pass
         
 if __name__ == "__main__":
     main()
