@@ -1,7 +1,8 @@
 """ Train or evaluate classifier. """
 
-import sys, os, argparse, glob, pickle, random, logging, datetime
+import sys, os, argparse, glob, pickle, random, logging, math
 from io import open
+from datetime import datetime
 import numpy as np
 import torch
 from torch.nn import CrossEntropyLoss
@@ -51,6 +52,11 @@ def main():
                               "Training data files only contains sentences. "
                               "Validation data files must be in 2-column TSV format, with sentence and label. "
                               "Test data may contain one or 2 columns."))
+    # Required for training
+    parser.add_argument("--dir_output",
+                        type=str,
+                        help="Directory in which model will be written (required if --do_train)")
+    
     # Execution modes
     parser.add_argument("--do_train",
                         action="store_true",
@@ -129,6 +135,12 @@ def main():
     if args.do_train:
         train_paths = glob.glob(os.path.join(args.dir_data, "*.train"))        
         assert len(train_paths) > 0
+        assert args.dir_output is not None
+        if os.path.exists(args.dir_output) and os.path.isdir(args.dir_output) and len(os.listdir(args.dir_output)) > 1:
+            msg = "%s already exists and is not empty" % args.dir_output
+            raise ValueError(msg)
+        if not os.path.exists(args.dir_output):
+            os.makedirs(args.dir_output)
     if args.do_eval or args.eval_during_training:
         path_dev_data = os.path.join(args.dir_data, "valid.tsv")        
         assert os.path.exists(path_dev_data)
@@ -195,7 +207,7 @@ def main():
         logger.info("Loading pooler...")
     else:
         logger.info("Making pooler...")
-    pooler = Pooler()
+    pooler = Pooler(model.config.hidden_size, cls_only=(not args.avgpool))
     if "pooler_state_dict" in checkpoint_data:
         pooler.load_state_dict(checkpoint_data["pooler_state_dict"])
     pooler.to(args.device)
@@ -207,8 +219,7 @@ def main():
         except ImportError:
             raise ImportError("Please install apex from https://www.github.com/nvidia/apex to use distributed training.")
         model = DDP(model)
-        if not args.mlm_only:
-            pooler = DDP(pooler) 
+        pooler = DDP(pooler) 
     elif args.n_gpu > 1:
         model = torch.nn.DataParallel(model, device_ids=device_ids)
         pooler = torch.nn.DataParallel(pooler, device_ids=device_ids)
@@ -216,8 +227,7 @@ def main():
     # Log some info on the model
     logger.info("Model config: %s" % repr(model.config))
     logger.info("Nb params: %d" % count_params(model))
-    if not args.mlm_only:
-        logger.info("Nb params in pooler: %d" % count_params(pooler))        
+    logger.info("Nb params in pooler: %d" % count_params(pooler))        
 
     
     # Load tokenizer
@@ -322,7 +332,7 @@ def main():
 
         # Prepare training log file
         time_str = datetime.now().strftime("%Y%m%d%H%M%S")
-        train_log_path = os.path.join(args.output_dir, "%s.train.log" % time_str)        
+        train_log_path = os.path.join(args.dir_output, "%s.train.log" % time_str)        
         args.train_log_path = train_log_path
 
         # Run training
