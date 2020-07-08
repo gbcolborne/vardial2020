@@ -51,13 +51,29 @@ def train(model, pooler, optimizer, scheduler, train_dataset, args, unk_dataset=
     - unk_dataset: optional) BertDatasetForMLM for unlabeled data
 
     """
+    assert type(train_dataset) == BertDatasetForClassification
+    if unk_dataset is not None:
+        assert len(train_dataset) == len(unk_dataset)
+        assert type(unk_dataset) == BertDatasetForMLM
+        
     # Write config and tokenizer in output directory
     path_config = os.path.join(args.dir_output, "config.json")
+    model.config.to_json_file(path_config)
     path_tokenizer = os.path.join(args.dir_output, "tokenizer.pkl")
     with open(path_tokenizer, "wb") as f:
         pickle.dump(tokenizer, f)
     
+    # Write header in log
+    header = "GlobalStep\tLossLangID\tAccuracyLangID\tLossMLM\tAccuracyMLM"
+    if unkdataset is not None:
+        header += "\tLossUnkMLM\tAccuracyUnkMLM"
+    header += "\tGradNorm\tWeightNorm"
+    with open(args.train_log_path, "w") as f:
+        f.write(header + "\n")
 
+    # Start training
+
+        
 def main():
     parser = argparse.ArgumentParser()
     # Model and data are required
