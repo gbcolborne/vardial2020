@@ -799,19 +799,21 @@ class BertDatasetForClassification(BertDatasetForTraining):
 class BertDatasetForTesting(Dataset):
     """ A class for evaluating classification on dev or test sets. """
     
-    def __init__(self, path_data, tokenizer, label2id, seq_len, encoding="utf-8"):
+    def __init__(self, path_data, tokenizer, label2id, seq_len, require_labels=False, encoding="utf-8"):
         """ Constructor.
 
         Args:
         - path_data: path of a file in TSV format, with one or 2 columns, containing texts and optional labels.
         - tokenizer:
         - label2id: dict that maps labels2ids
+        - seq_len: maximum sequence length (including CLS and SEP)
 
         """
         self.path_data = path_data
         self.tokenizer = tokenizer
         self.label2id = label2id
         self.seq_len = seq_len
+        self.require_labels = require_labels
         self.encoding = encoding
         self.data = []
         
@@ -823,6 +825,9 @@ class BertDatasetForTesting(Dataset):
                     # Empty line
                     continue
                 elif len(elems) == 1:
+                    if self.requre_labels:
+                        msg = "only once column found, but require_labels is True"
+                        raise RuntimeError(msg)
                     text = elems[0]
                     label = None
                 elif len(elems) == 2:
