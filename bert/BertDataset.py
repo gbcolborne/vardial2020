@@ -837,9 +837,10 @@ class BertDatasetForTesting(Dataset):
                     msg = "invalid number of columns (%d)" % len(elems)
                     raise RuntimeError(msg)
                 self.data.append((text, label))
-                    
+
+                
     def __len__(self):
-        return self.data
+        return len(self.data)
 
     
     def __getitem__(self, item):
