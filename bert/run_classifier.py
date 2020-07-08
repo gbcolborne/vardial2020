@@ -38,6 +38,26 @@ def check_for_unk_train_data(train_paths):
     return None
 
 
+def train(model, pooler, optimizer, scheduler, train_dataset, args, unk_dataset=None):
+    """ Train model. 
+
+    Args:
+    - model: BertModelForMaskedLM
+    - pooler: Pooler
+    - optimizer
+    - scheduler
+    - train_dataset: BertDatasetForClassification
+    - args
+    - unk_dataset: optional) BertDatasetForMLM for unlabeled data
+
+    """
+    # Write config and tokenizer in output directory
+    path_config = os.path.join(args.dir_output, "config.json")
+    path_tokenizer = os.path.join(args.dir_output, "tokenizer.pkl")
+    with open(path_tokenizer, "wb") as f:
+        pickle.dump(tokenizer, f)
+    
+
 def main():
     parser = argparse.ArgumentParser()
     # Model and data are required
@@ -88,10 +108,6 @@ def main():
                         default=128,
                         type=int,
                         help="Length of input sequences. Shorter seqs are padded, longer ones are trucated")
-    parser.add_argument("--min_freq",
-                        default=1,
-                        type=int,
-                        help="Minimum character frequency. Characters whose frequency is under this threshold will be mapped to <UNK>")
     parser.add_argument("--learning_rate",
                         default=1e-4,
                         type=float,
