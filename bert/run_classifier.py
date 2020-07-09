@@ -2,6 +2,7 @@
 
 import sys, os, argparse, glob, pickle, random, logging, math
 from io import open
+from itertools import chain
 from datetime import datetime
 import numpy as np
 import torch
@@ -11,6 +12,7 @@ from torch.utils.data.distributed import DistributedSampler
 from transformers import BertForMaskedLM, BertConfig
 from transformers import AdamW
 from transformers.optimization import get_linear_schedule_with_warmup
+from tqdm import tqdm, trange
 from CharTokenizer import CharTokenizer
 from BertDataset import BertDatasetForClassification, BertDatasetForMLM, BertDatasetForTesting
 from Pooler import Pooler
@@ -34,6 +36,15 @@ def get_dataloader(dataset, batch_size, local_rank, shuffle=True):
     else:
         sampler = DistributedSampler(dataset, shuffle=shuffle)
     return DataLoader(dataset, sampler=sampler, batch_size=batch_size)
+
+
+def accuracy(pred_scores, labels):
+    ytrue = labels.cpu().numpy()
+    ypred = pred_scores.detach().cpu().numpy()    
+    ypred = np.argmax(ypred, axis=1)
+    assert len(ytrue) == len(ypred)
+    accuracy = np.sum(ypred == ytrue)/len(ytrue)
+    return accuracy
 
 
 def count_params(model):
@@ -68,7 +79,7 @@ def check_for_unk_train_data(train_paths):
     return None
 
 
-def train(model, pooler, classifer, optimizer, scheduler, train_dataset, args, unk_dataset=None):
+def train(model, pooler, classifier, optimizer, scheduler, train_dataset, args, checkpoint_data, unk_dataset=None):
     """ Train model. 
 
     Args:
@@ -79,6 +90,7 @@ def train(model, pooler, classifer, optimizer, scheduler, train_dataset, args, u
     - scheduler
     - train_dataset: BertDatasetForClassification
     - args
+    - checkpoint_data: dict
     - unk_dataset: optional) BertDatasetForMLM for unlabeled data
 
     """
@@ -86,14 +98,7 @@ def train(model, pooler, classifer, optimizer, scheduler, train_dataset, args, u
     if unk_dataset is not None:
         assert len(train_dataset) == len(unk_dataset)
         assert type(unk_dataset) == BertDatasetForMLM
-        
-    # Write config and tokenizer in output directory
-    path_config = os.path.join(args.dir_output, "config.json")
-    model.config.to_json_file(path_config)
-    path_tokenizer = os.path.join(args.dir_output, "tokenizer.pkl")
-    with open(path_tokenizer, "wb") as f:
-        pickle.dump(tokenizer, f)
-    
+            
     # Write header in log
     header = "GlobalStep\tLossLangID\tAccuracyLangID\tLossMLM\tAccuracyMLM"
     if unk_dataset is not None:
@@ -146,7 +151,7 @@ def train(model, pooler, classifer, optimizer, scheduler, train_dataset, args, u
                                      attention_mask=input_mask,
                                      token_type_ids=segment_ids,
                                      position_ids=None)
-            lid_last_hidden_states = outputs[0] # Last hidden states, shape (batch_size, seq_len, hidden_size)
+            lid_last_hidden_states = lid_outputs[0]
 
             # Do classification (i.e. language identification)
             lid_encodings = pooler(lid_last_hidden_states)
@@ -157,7 +162,7 @@ def train(model, pooler, classifer, optimizer, scheduler, train_dataset, args, u
                                      attention_mask=input_mask,
                                      token_type_ids=segment_ids,
                                      position_ids=None)
-            mlm_last_hidden_states = outputs[0] # Last hidden states, shape (batch_size, seq_len, hidden_size)
+            mlm_last_hidden_states = mlm_outputs[0]
 
             # Do MLM on last hidden states
             mlm_pred_scores = model.cls(mlm_last_hidden_states)
@@ -171,11 +176,11 @@ def train(model, pooler, classifer, optimizer, scheduler, train_dataset, args, u
                 xinput_ids, xinput_mask, xsegment_ids, xlm_label_ids = unk_batch
                 # Make sure the batch sizes are equal
                 assert len(xinput_ids) == len(input_ids)
-                outputs = model.bert(input_ids=xinput_ids,
-                                     attention_mask=xinput_mask,
-                                     token_type_ids=xsegment_ids,
-                                     position_ids=None)
-                unk_last_hidden_states = outputs[0] # Last hidden states, shape (batch_size, seq_len, hidden_size)
+                unk_mlm_outputs = model.bert(input_ids=xinput_ids,
+                                             attention_mask=xinput_mask,
+                                             token_type_ids=xsegment_ids,
+                                             position_ids=None)
+                unk_last_hidden_states = unk_mlm_outputs[0]
                 unk_mlm_pred_scores = model.cls(unk_last_hidden_states)
 
             # Compute loss, do backprop. Compute accuracies.
@@ -196,7 +201,7 @@ def train(model, pooler, classifer, optimizer, scheduler, train_dataset, args, u
             
             # Compute norm of gradient
             training_grad_norm = 0
-            for param in model.parameters() + pooler.parameter() + classifier.parameters()
+            for param in chain(model.parameters(), pooler.parameters(), classifier.parameters()):
                 if param.grad is not None:
                     training_grad_norm += torch.norm(param.grad, p=2).item()
             grad_norms.append(training_grad_norm)
@@ -205,7 +210,7 @@ def train(model, pooler, classifer, optimizer, scheduler, train_dataset, args, u
             lid_acc = accuracy(lid_scores, label_ids)
             lid_accs.append(lid_acc)
             mlm_acc = accuracy(mlm_pred_scores.view(-1, model.config.vocab_size), lm_label_ids.view(-1))
-            mlm_accs.append(query_mlm_acc)
+            mlm_accs.append(mlm_acc)
             if unk_dataset is not None:
                 unk_mlm_acc = accuracy(unk_mlm_pred_scores.view(-1, model.config.vocab_size), xlm_label_ids.view(-1))
                 unk_mlm_accs.append(unk_mlm_acc)
@@ -231,7 +236,7 @@ def train(model, pooler, classifer, optimizer, scheduler, train_dataset, args, u
 
         # Compute norm of model weights
         weight_norm = 0
-        for param in model.parameters() + pooler.parameters() + classifier.parameters():
+        for param in chain(model.parameters(), pooler.parameters(), classifier.parameters()):
             weight_norm += torch.norm(param.data, p=2).item()
             
         # Write stats for this epoch in log
@@ -258,7 +263,7 @@ def train(model, pooler, classifer, optimizer, scheduler, train_dataset, args, u
         checkpoint_data['classifier_state_dict'] = classifier_to_save.state_dict()        
         checkpoint_data['optimizer_state_dict'] = optimizer.state_dict()        
         checkpoint_data['scheduler_state_dict'] = scheduler.state_dict()
-        checkpoint_path = os.path.join(args.output_dir, "checkpoint.tar")
+        checkpoint_path = os.path.join(args.dir_output, "checkpoint.tar")
         torch.save(checkpoint_data, checkpoint_path)            
 
         
@@ -305,7 +310,7 @@ def main():
                         default="relfreq",
                         help="Distribution used for sampling training data within each group (relevant, confound, and irrelevant)")
     parser.add_argument("--train_batch_size",
-                        default=32,
+                        default=16,
                         type=int,
                         help="Total batch size for training.")
     parser.add_argument("--seq_len",
@@ -531,6 +536,7 @@ def main():
         logger.info("Preparing optimizer...")
         np_list = list(model.named_parameters())
         np_list += list(pooler.named_parameters())
+        np_list += list(classifier.named_parameters())        
         no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
         opt_params = [
             {'params': [p for n, p in np_list if not any(nd in n for nd in no_decay)], 'weight_decay': 0.01},
@@ -561,13 +567,20 @@ def main():
         if args.eval_during_training:
             logger.info("Validation dataset size: %d" % len(dev_dataset))
 
-        # Prepare training log file
+        # Write config and tokenizer in output directory
+        path_config = os.path.join(args.dir_output, "config.json")
+        model.config.to_json_file(path_config)
+        path_tokenizer = os.path.join(args.dir_output, "tokenizer.pkl")
+        with open(path_tokenizer, "wb") as f:
+            pickle.dump(tokenizer, f)
+            
+        # Prepare path of training log
         time_str = datetime.now().strftime("%Y%m%d%H%M%S")
         train_log_path = os.path.join(args.dir_output, "%s.train.log" % time_str)        
         args.train_log_path = train_log_path
 
         # Run training
-        train(model, pooler, classifier, optimizer, scheduler, train_dataset, args, unk_dataset=unk_dataset)
+        train(model, pooler, classifier, optimizer, scheduler, train_dataset, args, checkpoint_data, unk_dataset=unk_dataset)
 
     if args.do_eval:
         pass

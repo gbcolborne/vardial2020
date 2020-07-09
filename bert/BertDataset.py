@@ -648,7 +648,7 @@ class InputExampleForClassification(object):
 class InputFeaturesForClassification(object):
     """A single set of features of data for classification, and optionally masked language modeling. """
 
-    def __init__(self, input_ids, input_mask, segment_ids, label_id, masked_input_ids=None, lm_label_ids=None):
+    def __init__(self, input_ids, input_mask, segment_ids, label_id, masked_input_ids, lm_label_ids):
         self.input_ids = input_ids # List input token IDs
         self.input_mask = input_mask # List containing input mask 
         self.segment_ids = segment_ids # List containing token type (segment) IDs
@@ -700,18 +700,14 @@ class BertDatasetForClassification(BertDatasetForTraining):
         example_id = self.sample_counter
         self.sample_counter += 1
         tokens = self.tokenizer.tokenize(text)
-        example = InputExampleForMLM(guid=example_id, tokens=tokens, label=lang)
+        example = InputExampleForClassification(guid=example_id, tokens=tokens, label=lang)
         features = self._convert_example_to_features(example)
         tensors = [torch.tensor(features.input_ids),
                    torch.tensor(features.input_mask),
                    torch.tensor(features.segment_ids),
-                   torch.tensor(features.label_id)]
-        if self.include_mlm:
-            tensors.append(None)
-            tensors.append(None)
-        else:
-            tensors.append(torch.tensor(features.masked_input_ids))
-            tensors.append(torch.tensor(features.lm_label_ids))
+                   torch.tensor(features.label_id),
+                   torch.tensor(features.masked_input_ids),
+                   torch.tensor(features.lm_label_ids)]
         return tensors
 
     
@@ -765,7 +761,7 @@ class BertDatasetForClassification(BertDatasetForTraining):
         assert len(input_ids) == self.seq_len
         assert len(input_mask) == self.seq_len
         assert len(segment_ids) == self.seq_len
-        if include_mlm:
+        if self.include_mlm:
             assert len(masked_input_ids) == self.seq_len            
             assert len(lm_label_ids) == self.seq_len
         
@@ -785,8 +781,8 @@ class BertDatasetForClassification(BertDatasetForTraining):
 
         # Get features
         if not self.include_mlm:
-            masked_input_ids = None
-            lm_label_ids = None
+            masked_input_ids = []
+            lm_label_ids = []
         features = InputFeaturesForClassification(input_ids=input_ids,
                                                   input_mask=input_mask,
                                                   segment_ids=segment_ids,
