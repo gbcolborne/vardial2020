@@ -7,8 +7,6 @@ from datetime import datetime
 import numpy as np
 import torch
 from torch.nn import CrossEntropyLoss
-from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
-from torch.utils.data.distributed import DistributedSampler
 from transformers import BertForMaskedLM, BertConfig
 from transformers import AdamW
 from transformers.optimization import get_linear_schedule_with_warmup
@@ -17,6 +15,7 @@ from CharTokenizer import CharTokenizer
 from BertDataset import BertDatasetForClassification, BertDatasetForMLM, BertDatasetForTesting
 from Pooler import Pooler
 from Classifier import Classifier
+from utils import check_for_unk_train_data, adjust_loss, weighted_avg, count_params, accuracy, get_dataloader
 sys.path.append("..")
 from comp_utils import ALL_LANGS
 
@@ -25,58 +24,6 @@ logging.basicConfig(format='%(asctime)s - %(levelname)s - %(name)s -   %(message
                     datefmt='%m/%d/%Y %H:%M:%S',
                     level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-
-def get_dataloader(dataset, batch_size, local_rank, shuffle=True):
-    if local_rank == -1:
-        if shuffle:            
-            sampler = RandomSampler(dataset)
-        else:
-            sampler = SequentialSampler(dataset)            
-    else:
-        sampler = DistributedSampler(dataset, shuffle=shuffle)
-    return DataLoader(dataset, sampler=sampler, batch_size=batch_size)
-
-
-def accuracy(pred_scores, labels):
-    ytrue = labels.cpu().numpy()
-    ypred = pred_scores.detach().cpu().numpy()    
-    ypred = np.argmax(ypred, axis=1)
-    assert len(ytrue) == len(ypred)
-    accuracy = np.sum(ypred == ytrue)/len(ytrue)
-    return accuracy
-
-
-def count_params(model):
-    count = 0
-    for p in model.parameters():
-         count += torch.prod(torch.tensor(p.size())).item()
-    return count
-
-
-def weighted_avg(vals, weights):
-    vals = np.asarray(vals)
-    weights = np.asarray(weights)
-    assert len(vals.shape) == 1
-    assert vals.shape == weights.shape
-    probs = weights / weights.sum()
-    return np.sum(vals * probs)    
-
-
-def adjust_loss(loss, args):
-    # Adapt loss for distributed training or gradient accumulation
-    if args.n_gpu > 1:
-        loss = loss.mean() # mean() to average on multi-gpu.
-    if args.grad_accum_steps > 1:
-        loss = loss / args.grad_accum_steps
-    return loss
-
-
-def check_for_unk_train_data(train_paths):
-    for path in train_paths:
-        if os.path.split(path)[-1] == "unk.train":
-            return path
-    return None
 
 
 def train(model, pooler, classifier, optimizer, scheduler, train_dataset, args, checkpoint_data, unk_dataset=None):
