@@ -26,6 +26,45 @@ logging.basicConfig(format='%(asctime)s - %(levelname)s - %(name)s -   %(message
 logger = logging.getLogger(__name__)
 
 
+def predict(model, pooler, classifier, eval_dataset, args):
+    """ Get predicted scores (un-normalized) for examples in dataset. 
+
+    Args:
+    - model: BertModelForMaskedLM
+    - pooler: Pooler
+    - classifier: Classifier
+    - eval_dataset: BertDatasetForTesting
+    - args
+
+
+    Returns: predicted scores, tensor of shape (nb examples, nb classes)
+
+    """
+    assert type(eval_dataset) == BertDatasetForTesting
+    dataloader = get_dataloader(eval_dataset, args.eval_batch_size, args.local_rank, shuffle=False)
+    scores = []
+    model.eval()
+    pooler.eval()
+    classifier.eval()
+    for step, batch in enumerate(tqdm(dataloader, desc="Prediction")):
+        # Unpack batch
+        batch = tuple(t.to(args.device) for t in batch)
+        input_ids = batch[0]
+        input_mask = batch[1]
+        segment_ids = batch[2]
+        with torch.no_grad():
+            lid_outputs = model.bert(input_ids=input_ids,
+                                     attention_mask=input_mask,
+                                     token_type_ids=segment_ids,
+                                     position_ids=None)
+            lid_last_hidden_states = lid_outputs[0]
+            lid_encodings = pooler(lid_last_hidden_states)
+            lid_scores = classifier(lid_encodings)
+        scores.append(lid_scores)
+    scores_tensor = torch.cat(scores, dim=0)
+    return scores_tensor
+
+
 def train(model, pooler, classifier, optimizer, scheduler, train_dataset, args, checkpoint_data, unk_dataset=None):
     """ Train model. 
 
@@ -39,6 +78,9 @@ def train(model, pooler, classifier, optimizer, scheduler, train_dataset, args, 
     - args
     - checkpoint_data: dict
     - unk_dataset: optional) BertDatasetForMLM for unlabeled data
+
+
+    Returns: None
 
     """
     assert type(train_dataset) == BertDatasetForClassification
@@ -56,8 +98,10 @@ def train(model, pooler, classifier, optimizer, scheduler, train_dataset, args, 
 
     # Start training
     logger.info("***** Running training *****")
-    model.train()
     for epoch in trange(int(args.num_epochs), desc="Epoch"):
+        model.train()
+        pooler.train()
+        classifier.train()
         # Get fresh training samples
         if epoch > 0:
               train_dataset.resample()
@@ -231,7 +275,7 @@ def main():
     # Required for training
     parser.add_argument("--dir_output",
                         type=str,
-                        help="Directory in which model will be written (required if --do_train)")
+                        help="Directory in which model will be written (required if --do_train or --do_pred)")
     
     # Execution modes
     parser.add_argument("--do_train",
@@ -260,6 +304,10 @@ def main():
                         default=16,
                         type=int,
                         help="Total batch size for training.")
+    parser.add_argument("--eval_batch_size",
+                        default=16,
+                        type=int,
+                        help="Total batch size for evaluation.")
     parser.add_argument("--seq_len",
                         default=128,
                         type=int,
@@ -307,6 +355,7 @@ def main():
     if args.do_train:
         train_paths = glob.glob(os.path.join(args.dir_data, "*.train"))        
         assert len(train_paths) > 0
+    if args.do_train or args.do_pred:
         assert args.dir_output is not None
         if os.path.exists(args.dir_output) and os.path.isdir(args.dir_output) and len(os.listdir(args.dir_output)) > 1:
             msg = "%s already exists and is not empty" % args.dir_output
@@ -530,9 +579,16 @@ def main():
         train(model, pooler, classifier, optimizer, scheduler, train_dataset, args, checkpoint_data, unk_dataset=unk_dataset)
 
     if args.do_eval:
-        pass
+        scores = predict(model, pooler, classifier, dev_dataset, args)
     if args.do_pred:
-        pass
+        scores = predict(model, pooler, classifier, test_dataset, args)
+        pred_class_ids = np.argmax(scores.cpu().numpy(), axis=1)
+        pred_labels = [test_dataset.label_list[i] for i in pred_class_ids]
+        path_pred = os.path.join(args.dir_output, "pred.txt")
+        logger.info("Writing predictions in %s..." % path_pred)
+        with open(path_pred, 'w', encoding="utf-8") as f:
+            for x in pred_labels:
+                f.write("%s\n" % x)
         
 if __name__ == "__main__":
     main()

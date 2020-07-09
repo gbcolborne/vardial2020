@@ -812,6 +812,10 @@ class BertDatasetForTesting(Dataset):
         self.require_labels = require_labels
         self.encoding = encoding
         self.data = []
+        self.label_list = [None] * len(label2id)
+        for label, label_id in label2id.items():
+            self.label_list[label_id] = label
+        assert None not in self.label_list
         
         # Load data
         with open(self.path_data, encoding=self.encoding) as f:
@@ -840,7 +844,7 @@ class BertDatasetForTesting(Dataset):
 
     
     def __getitem__(self, item):
-        text, label = self.sampled_dataset[item]
+        text, label = self.data[item]
         example_id = item
         tokens = self.tokenizer.tokenize(text)
         example = InputExampleForClassification(guid=example_id, tokens=tokens, label=label)
@@ -848,8 +852,8 @@ class BertDatasetForTesting(Dataset):
         tensors = [torch.tensor(features.input_ids),
                    torch.tensor(features.input_mask),
                    torch.tensor(features.segment_ids)]
-        if label is None:
-            tensors.append(None)
+        if features.label_id is None:
+            tensors.append(torch.empty(0))
         else:
             tensors.append(torch.tensor(features.label_id))
         return tensors
@@ -910,5 +914,7 @@ class BertDatasetForTesting(Dataset):
         features = InputFeaturesForClassification(input_ids=input_ids,
                                                   input_mask=input_mask,
                                                   segment_ids=segment_ids,
-                                                  label_id=label_id)
+                                                  label_id=label_id,
+                                                  masked_input_ids=[],
+                                                  lm_label_ids=[])
         return features
