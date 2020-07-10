@@ -46,8 +46,6 @@ def evaluate(model, pooler, classifier, eval_dataset, args):
     # Extract label IDs from the dataset
     gold_label_ids = [x[3] for x in eval_dataset]
     gold_label_ids = torch.tensor(gold_label_ids).to(args.device)
-    print("Gold label IDs:")
-    print(gold_label_ids)
     
     # Compute loss
     loss_fct = CrossEntropyLoss(reduction="mean")
