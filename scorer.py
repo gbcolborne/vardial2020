@@ -21,7 +21,7 @@ def load_labels(path):
 def print_title_with_border(title):
     title = "--- %s ---" % title
     line = "-" * len(title)
-    print("\n\n%s\n%s\n%s\n" % (line, title, line))
+    print("\n%s\n%s\n%s\n" % (line, title, line))
 
 
 def compute_fscores(pred, gold, verbose=False):
@@ -51,9 +51,9 @@ def compute_fscores(pred, gold, verbose=False):
                                    track=1,
                                    verbose=False)
     if verbose:
-        title = "Results (track 1)"
+        title = "Results (Track 1)"
         print_title_with_border(title)
-        print("- Average (macro) F1-score: %.4f\n\n" % fscore1)
+        print("- Average (macro) F1-score: %.4f" % fscore1)
             
     # For track 2, the score is the micro-averaged f1-score over
     # sentences.
@@ -64,19 +64,19 @@ def compute_fscores(pred, gold, verbose=False):
                          average="micro",
                          zero_division=0)
     if verbose:
-        title = "Results (track 2)"
+        title = "Results (Track 2)"
         print_title_with_border(title)
         print("- Precision: %.4f" % p)
         print("- Recall: %.4f" % r)
-        print("- F1-score: %.4f\n\n" % fscore2)
+        print("- F1-score: %.4f" % fscore2)
 
     # For track 3, the score is the average (macro) f1-score
     # over all 178 languages.
     fscore3 = compute_macro_fscore(pred, gold, track=3, verbose=False)
     if verbose:
-        title = "Results (track 3)"
+        title = "Results (Track 3)"
         print_title_with_border(title)
-        print("- Average (macro) F1-score: %.4f\n\n" % fscore3)
+        print("- Average (macro) F1-score: %.4f" % fscore3)
     return {"track1":fscore1, "track2":fscore2, "track3":fscore3}
 
 
@@ -153,7 +153,7 @@ def main():
     pred = load_labels(args.path_pred)
     gold = load_labels(args.path_gold)
     fscore_dict = compute_fscores(pred, gold, verbose=True)
-
+    print("\n\n")
     
 if __name__ == "__main__":
     main()
