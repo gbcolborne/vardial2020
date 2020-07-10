@@ -18,12 +18,51 @@ from Classifier import Classifier
 from utils import check_for_unk_train_data, adjust_loss, weighted_avg, count_params, accuracy, get_dataloader
 sys.path.append("..")
 from comp_utils import ALL_LANGS
+from scorer import compute_fscores
 
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(name)s -   %(message)s',
                     datefmt='%m/%d/%Y %H:%M:%S',
                     level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+def evaluate(model, pooler, classifier, eval_dataset, args):
+    """ Evaluate model. 
+
+    Args:
+    - model: BertModelForMaskedLM
+    - pooler: Pooler
+    - classifier: Classifier
+    - eval_dataset: BertDatasetForTesting
+    - args
+
+    Returns: Dict containing scores
+
+    """
+    # Get logits (un-normalized class scores) from model
+    logits = predict(model, pooler, classifier, eval_dataset, args)
+
+    # Extract label IDs from the dataset
+    gold_label_ids = [x[3] for x in eval_dataset]
+    gold_label_ids = torch.tensor(gold_label_ids).to(args.device)
+    print("Gold label IDs:")
+    print(gold_label_ids)
+    
+    # Compute loss
+    loss_fct = CrossEntropyLoss(reduction="mean")
+    loss = loss_fct(logits, gold_label_ids)
+    scores = {}
+    scores["loss"] = loss.item()
+    
+    # Compute f-scores
+    pred_label_ids = np.argmax(logits.detach().cpu().numpy(), axis=1).tolist()    
+    gold_label_ids = gold_label_ids.detach().cpu().numpy().tolist()
+    pred_labels = [eval_dataset.label_list[i] for i in pred_label_ids]
+    gold_labels = [eval_dataset.label_list[i] for i in gold_label_ids]
+    fscore_dict = compute_fscores(pred_labels, gold_labels, verbose=False)
+    scores.update(fscore_dict)
+    return scores
 
 
 def predict(model, pooler, classifier, eval_dataset, args):
@@ -578,11 +617,17 @@ def main():
         # Run training
         train(model, pooler, classifier, optimizer, scheduler, train_dataset, args, checkpoint_data, unk_dataset=unk_dataset)
 
+    # Evaluate model on dev set
     if args.do_eval:
-        scores = predict(model, pooler, classifier, dev_dataset, args)
+        scores = evaluate(model, pooler, classifier, dev_dataset, args)
+        logger.info("***** Evaluation Results *****")
+        for score_name in sorted(scores.keys()):
+            logger.info("- %s: %.4f" % (score_name, scores[score_name]))
+
+    # Get model's predictions on test set
     if args.do_pred:
-        scores = predict(model, pooler, classifier, test_dataset, args)
-        pred_class_ids = np.argmax(scores.cpu().numpy(), axis=1)
+        logits = predict(model, pooler, classifier, test_dataset, args)
+        pred_class_ids = np.argmax(logits.cpu().numpy(), axis=1)
         pred_labels = [test_dataset.label_list[i] for i in pred_class_ids]
         path_pred = os.path.join(args.dir_output, "pred.txt")
         logger.info("Writing predictions in %s..." % path_pred)
