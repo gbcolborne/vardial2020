@@ -129,11 +129,12 @@ def compute_macro_fscore(pred, gold, track=1, verbose=False):
                 f1score = 0.0
             else:
                 assert nb_pred > 0
-                # If nb_pred and nb_gold are both strictly
-                # positive, f-score is well-defined.
                 precision = tp / nb_pred
                 recall = tp / nb_gold
-                f1score = 2 * precision * recall / (precision + recall)
+                if (precision + recall) > 0:
+                    f1score = 2 * precision * recall / (precision + recall)
+                else:
+                    f1score = 0
         f1scores.append(f1score)
         if verbose:
             print("\nStats for label '%s':" % labels[i])
