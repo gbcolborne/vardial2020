@@ -104,7 +104,7 @@ def predict(model, pooler, classifier, eval_dataset, args):
     return scores_tensor
 
 
-def train(model, pooler, classifier, optimizer, scheduler, train_dataset, args, checkpoint_data, unk_dataset=None):
+def train(model, pooler, classifier, optimizer, scheduler, train_dataset, args, checkpoint_data, dev_dataset=None, unk_dataset=None):
     """ Train model. 
 
     Args:
@@ -116,13 +116,17 @@ def train(model, pooler, classifier, optimizer, scheduler, train_dataset, args, 
     - train_dataset: BertDatasetForClassification
     - args
     - checkpoint_data: dict
-    - unk_dataset: optional) BertDatasetForMLM for unlabeled data
+    - unk_dataset: (optional) BertDatasetForMLM for dev data (required if eval_during_training
+    - unk_dataset: (optional) BertDatasetForMLM for unlabeled data
 
 
     Returns: None
 
     """
     assert type(train_dataset) == BertDatasetForClassification
+    if args.eval_during_training:
+        assert dev_dataset is not None
+        type(dev_dataset) == BertDatasetForTesting
     if unk_dataset is not None:
         assert len(train_dataset) == len(unk_dataset)
         assert type(unk_dataset) == BertDatasetForMLM
@@ -132,6 +136,8 @@ def train(model, pooler, classifier, optimizer, scheduler, train_dataset, args, 
     if unk_dataset is not None:
         header += "\tLossUnkMLM\tAccuracyUnkMLM"
     header += "\tGradNorm\tWeightNorm"
+    if args.eval_during_training:
+        header += "\tDevLoss\tDevF1Track1\tDevF1Track2\tDevF1Track3"
     with open(args.train_log_path, "w") as f:
         f.write(header + "\n")
 
@@ -268,6 +274,10 @@ def train(model, pooler, classifier, optimizer, scheduler, train_dataset, args, 
         weight_norm = 0
         for param in chain(model.parameters(), pooler.parameters(), classifier.parameters()):
             weight_norm += torch.norm(param.data, p=2).item()
+
+        # Evaluate model on dev set
+        if args.eval_during_training:
+            dev_scores = evaluate(model, pooler, classifier, dev_dataset, args)            
             
         # Write stats for this epoch in log
         log_data = []
@@ -280,7 +290,12 @@ def train(model, pooler, classifier, optimizer, scheduler, train_dataset, args, 
             log_data.append("{:.5f}".format(avg_unk_mlm_loss))
             log_data.append("{:.5f}".format(avg_unk_mlm_acc))
         log_data.append("{:.5f}".format(last_grad_norm))
-        log_data.append("{:.5f}".format(weight_norm))        
+        log_data.append("{:.5f}".format(weight_norm))
+        if args.eval_during_training:
+            log_data.append("{:.5f}".format(dev_scores["loss"]))
+            log_data.append("{:.5f}".format(dev_scores["track1"]))
+            log_data.append("{:.5f}".format(dev_scores["track2"]))
+            log_data.append("{:.5f}".format(dev_scores["track3"]))                            
         with open(args.train_log_path, "a") as f:
             f.write("\t".join(log_data)+"\n")
 
@@ -615,8 +630,24 @@ def main():
         args.train_log_path = train_log_path
 
         # Run training
-        train(model, pooler, classifier, optimizer, scheduler, train_dataset, args, checkpoint_data, unk_dataset=unk_dataset)
-
+        if not args.eval_during_training:
+            dev_dataset = None
+        train(model,
+              pooler,
+              classifier,
+              optimizer,
+              scheduler,
+              train_dataset,
+              args,
+              checkpoint_data,
+              dev_dataset=dev_dataset,
+              unk_dataset=unk_dataset)
+        # Reload model
+        checkpoint_data = torch.load(os.path.join(args.dir_output, "checkpoint.tar"))
+        model.load_state_dict(checkpoint_data["model_state_dict"])
+        pooler.load_state_dict(checkpoint_data["pooler_state_dict"])
+        classifier.load_state_dict(checkpoint_data["classifier_state_dict"])
+        
     # Evaluate model on dev set
     if args.do_eval:
         scores = evaluate(model, pooler, classifier, dev_dataset, args)
