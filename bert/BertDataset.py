@@ -105,7 +105,7 @@ class BertDatasetForTraining(Dataset):
 
     """
 
-    def __init__(self, train_paths, tokenizer, seq_len, size, unk_only=False, sampling_distro="uniform", encoding="utf-8", seed=None):
+    def __init__(self, train_paths, tokenizer, seq_len, size, unk_only=False, sampling_distro="uniform", encoding="utf-8", seed=None, verbose=False):
         assert sampling_distro in ["uniform", "relfreq", "dampfreq"]
         self.tokenizer = tokenizer
         self.vocab = tokenizer.vocab
@@ -113,7 +113,8 @@ class BertDatasetForTraining(Dataset):
         self.unk_only = unk_only
         self.seq_len = seq_len # Includes CLS and SEP tokens
         self.sampling_distro = sampling_distro
-        self.encoding = encoding        
+        self.encoding = encoding
+        self.verbose = verbose
         self.sample_counter = 0  # total number of examples sampled by calling __getitem__ (across all epochs)
         self.total_dataset_size = 0
         self.lang_list = []
@@ -260,12 +261,12 @@ class InputFeaturesForMLM(object):
     
 class BertDatasetForMLM(BertDatasetForTraining):
     
-    def __init__(self, train_paths, tokenizer, seq_len, unk_only=False, sampling_distro="uniform", encoding="utf-8", seed=None):
+    def __init__(self, train_paths, tokenizer, seq_len, unk_only=False, sampling_distro="uniform", encoding="utf-8", seed=None, verbose=False):
         # Init parent class
         size = REL_SAMPLE_SIZE + CON_SAMPLE_SIZE + IRR_SAMPLE_SIZE
         if not unk_only and check_for_unk_train_data(train_paths) is not None:
             size += UNK_SAMPLE_SIZE
-        super().__init__(train_paths, tokenizer, seq_len, size, unk_only=unk_only, sampling_distro=sampling_distro, encoding=encoding, seed=seed)
+        super().__init__(train_paths, tokenizer, seq_len, size, unk_only=unk_only, sampling_distro=sampling_distro, encoding=encoding, seed=seed, verbose=verbose)
         
         # Sample a training set
         self.resample() 
@@ -353,7 +354,7 @@ class BertDatasetForMLM(BertDatasetForTraining):
         assert len(segment_ids) == self.seq_len
         assert len(lm_label_ids) == self.seq_len
         
-        if example.guid < 5:
+        if self.verbose and example.guid < 5:
             logger.info("*** Example ***")
             logger.info("guid: {}".format(example.guid))
             logger.info("tokens: {}".format(tokens))
@@ -404,11 +405,11 @@ class InputFeaturesForSPCAndMLM(object):
 
 class BertDatasetForSPCAndMLM(BertDatasetForTraining):
     
-    def __init__(self, train_paths, tokenizer, seq_len, sampling_distro="uniform", encoding="utf-8", seed=None):
+    def __init__(self, train_paths, tokenizer, seq_len, sampling_distro="uniform", encoding="utf-8", seed=None, verbose=False):
         size = REL_SAMPLE_SIZE + CON_SAMPLE_SIZE + IRR_SAMPLE_SIZE
         
         # Init parent class
-        super().__init__(train_paths, tokenizer, seq_len, size, sampling_distro=sampling_distro, encoding=encoding, seed=seed)
+        super().__init__(train_paths, tokenizer, seq_len, size, sampling_distro=sampling_distro, encoding=encoding, seed=seed, verbose=verbose)
 
         # Compute sampling probabilities for negative candidates
         counts = np.array([self.lang2samplesize[k] for k in self.lang_list], dtype=float)
@@ -604,7 +605,7 @@ class BertDatasetForSPCAndMLM(BertDatasetForTraining):
         assert len(lm_label_ids_query) == self.seq_len
 
         # Print a few examples.
-        if example.guid < 5:
+        if self.verbose and example.guid < 5:
             logger.info("*** Example ***")
             logger.info("guid: {}".format(example.guid))
             logger.info("tokens_query: {}".format(tokens_query))
@@ -659,10 +660,10 @@ class InputFeaturesForClassification(object):
     
 class BertDatasetForClassification(BertDatasetForTraining):
     
-    def __init__(self, train_paths, tokenizer, seq_len, include_mlm=False, sampling_distro="uniform", encoding="utf-8", seed=None):
+    def __init__(self, train_paths, tokenizer, seq_len, include_mlm=False, sampling_distro="uniform", encoding="utf-8", seed=None, verbose=False):
         # Init parent class
         size = REL_SAMPLE_SIZE + CON_SAMPLE_SIZE + IRR_SAMPLE_SIZE
-        super().__init__(train_paths, tokenizer, seq_len, size, unk_only=False, sampling_distro=sampling_distro, encoding=encoding, seed=seed)
+        super().__init__(train_paths, tokenizer, seq_len, size, unk_only=False, sampling_distro=sampling_distro, encoding=encoding, seed=seed, verbose=verbose)
         self.include_mlm = include_mlm
         
         # Sample a training set
@@ -765,7 +766,7 @@ class BertDatasetForClassification(BertDatasetForTraining):
             assert len(masked_input_ids) == self.seq_len            
             assert len(lm_label_ids) == self.seq_len
         
-        if example.guid < 5:
+        if self.verbose and example.guid < 5:
             logger.info("*** Example ***")
             logger.info("guid: {}".format(example.guid))
             logger.info("tokens: {}".format(tokens))
@@ -795,7 +796,7 @@ class BertDatasetForClassification(BertDatasetForTraining):
 class BertDatasetForTesting(Dataset):
     """ A class for evaluating classification on dev or test sets. """
     
-    def __init__(self, path_data, tokenizer, label2id, seq_len, require_labels=False, encoding="utf-8"):
+    def __init__(self, path_data, tokenizer, label2id, seq_len, require_labels=False, encoding="utf-8", verbose=False):
         """ Constructor.
 
         Args:
@@ -811,6 +812,7 @@ class BertDatasetForTesting(Dataset):
         self.seq_len = seq_len
         self.require_labels = require_labels
         self.encoding = encoding
+        self.verbose = verbose
         self.data = []
         self.label_list = [None] * len(label2id)
         for label, label_id in label2id.items():
@@ -900,7 +902,7 @@ class BertDatasetForTesting(Dataset):
         assert len(input_mask) == self.seq_len
         assert len(segment_ids) == self.seq_len
         
-        if example.guid < 5:
+        if self.verbose and example.guid < 5:
             logger.info("*** Example ***")
             logger.info("guid: {}".format(example.guid))
             logger.info("tokens: {}".format(tokens))
