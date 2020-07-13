@@ -486,7 +486,8 @@ def main():
                                             unk_only=True,
                                             sampling_distro=args.sampling_distro,
                                             encoding="utf-8",
-                                            seed=args.seed)
+                                            seed=args.seed,
+                                            verbose=True)
 
         logger.info("Loading training data from %s training files in %s..." % (len(train_paths),args.dir_data))
         train_dataset = BertDatasetForClassification(train_paths,
@@ -495,7 +496,8 @@ def main():
                                                      include_mlm=True,
                                                      sampling_distro=args.sampling_distro,
                                                      encoding="utf-8",
-                                                     seed=args.seed)
+                                                     seed=args.seed,
+                                                     verbose=True)
         if path_unk is not None:
             assert len(unk_dataset) == len(train_dataset)
         lang2id = train_dataset.lang2id
@@ -514,7 +516,8 @@ def main():
                                             lang2id,
                                             max_seq_length,
                                             require_labels=True,
-                                            encoding="utf-8")
+                                            encoding="utf-8",
+                                            verbose=True)
     if args.do_pred:
         logger.info("Loading test data from %s..." % path_test_data)                                
         test_dataset = BertDatasetForTesting(path_test_data,
@@ -522,7 +525,8 @@ def main():
                                              lang2id,
                                              max_seq_length,
                                              require_labels=False,
-                                             encoding="utf-8")
+                                             encoding="utf-8",
+                                             verbose=True)
 
     # Load model config
     logger.info("Loading config...")
