@@ -20,6 +20,7 @@ sys.path.append("..")
 from comp_utils import ALL_LANGS
 from scorer import compute_fscores
 
+DEBUG=False
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(name)s -   %(message)s',
                     datefmt='%m/%d/%Y %H:%M:%S',
@@ -487,7 +488,7 @@ def main():
                                             sampling_distro=args.sampling_distro,
                                             encoding="utf-8",
                                             seed=args.seed,
-                                            verbose=True)
+                                            verbose=DEBUG)
 
         logger.info("Loading training data from %s training files in %s..." % (len(train_paths),args.dir_data))
         train_dataset = BertDatasetForClassification(train_paths,
@@ -497,7 +498,7 @@ def main():
                                                      sampling_distro=args.sampling_distro,
                                                      encoding="utf-8",
                                                      seed=args.seed,
-                                                     verbose=True)
+                                                     verbose=DEBUG)
         if path_unk is not None:
             assert len(unk_dataset) == len(train_dataset)
         lang2id = train_dataset.lang2id
@@ -517,7 +518,7 @@ def main():
                                             max_seq_length,
                                             require_labels=True,
                                             encoding="utf-8",
-                                            verbose=True)
+                                            verbose=DEBUG)
     if args.do_pred:
         logger.info("Loading test data from %s..." % path_test_data)                                
         test_dataset = BertDatasetForTesting(path_test_data,
@@ -526,7 +527,7 @@ def main():
                                              max_seq_length,
                                              require_labels=False,
                                              encoding="utf-8",
-                                             verbose=True)
+                                             verbose=DEBUG)
 
     # Load model config
     logger.info("Loading config...")
@@ -609,13 +610,13 @@ def main():
 
         # Log some info before training
         logger.info("*** Training info: ***")
-        logger.info("Max training steps: %d" % args.max_train_steps)
-        logger.info("Gradient accumulation steps: %d" % args.grad_accum_steps)
-        logger.info("Max optimization steps: %d" % checkpoint_data["max_opt_steps"])
-        logger.info("Training dataset size: %d" % len(train_dataset))
-        logger.info("Batch size: %d" % args.train_batch_size)
-        logger.info("# optimization steps/epoch: %d" % num_opt_steps_per_epoch)
-        logger.info("# epochs to do: %d" % args.num_epochs)
+        logger.info("  Max training steps: %d" % args.max_train_steps)
+        logger.info("  Gradient accumulation steps: %d" % args.grad_accum_steps)
+        logger.info("  Max optimization steps: %d" % checkpoint_data["max_opt_steps"])
+        logger.info("  Training dataset size: %d" % len(train_dataset))
+        logger.info("  Batch size: %d" % args.train_batch_size)
+        logger.info("  # optimization steps/epoch: %d" % num_opt_steps_per_epoch)
+        logger.info("  # epochs to do: %d" % args.num_epochs)
         if args.eval_during_training:
             logger.info("Validation dataset size: %d" % len(dev_dataset))
 
@@ -652,6 +653,7 @@ def main():
         
     # Evaluate model on dev set
     if args.do_eval:
+        logger.info("*** Running evaluation... ***")
         scores = evaluate(model, pooler, classifier, dev_dataset, args)
         logger.info("***** Evaluation Results *****")
         for score_name in sorted(scores.keys()):
@@ -659,6 +661,7 @@ def main():
 
     # Get model's predictions on test set
     if args.do_pred:
+        logger.info("*** Running prediction... ***")        
         logits = predict(model, pooler, classifier, test_dataset, args)
         pred_class_ids = np.argmax(logits.cpu().numpy(), axis=1)
         pred_labels = [test_dataset.label_list[i] for i in pred_class_ids]
