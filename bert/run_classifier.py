@@ -9,7 +9,6 @@ import torch
 from torch.nn import CrossEntropyLoss
 from transformers import BertForMaskedLM, BertConfig
 from transformers import AdamW
-from transformers.optimization import get_linear_schedule_with_warmup
 from tqdm import tqdm, trange
 from CharTokenizer import CharTokenizer
 from BertDataset import BertDatasetForClassification, BertDatasetForMLM, BertDatasetForTesting
@@ -103,7 +102,7 @@ def predict(model, pooler, classifier, eval_dataset, args):
     return scores_tensor
 
 
-def train(model, pooler, classifier, optimizer, scheduler, train_dataset, args, checkpoint_data, dev_dataset=None, unk_dataset=None):
+def train(model, pooler, classifier, optimizer, train_dataset, args, checkpoint_data, dev_dataset=None, unk_dataset=None):
     """ Train model. 
 
     Args:
@@ -111,7 +110,6 @@ def train(model, pooler, classifier, optimizer, scheduler, train_dataset, args, 
     - pooler: Pooler
     - classifier: Classifier
     - optimizer
-    - scheduler
     - train_dataset: BertDatasetForClassification
     - args
     - checkpoint_data: dict
@@ -254,7 +252,6 @@ def train(model, pooler, classifier, optimizer, scheduler, train_dataset, args, 
             if (step + 1) % args.grad_accum_steps == 0:
                 optimizer.step()
                 optimizer.zero_grad()
-                scheduler.step()
                 checkpoint_data["global_step"] += 1
                 if checkpoint_data["global_step"] >= checkpoint_data["max_opt_steps"]:
                     break
@@ -306,7 +303,6 @@ def train(model, pooler, classifier, optimizer, scheduler, train_dataset, args, 
         checkpoint_data['pooler_state_dict'] = pooler_to_save.state_dict()
         checkpoint_data['classifier_state_dict'] = classifier_to_save.state_dict()        
         checkpoint_data['optimizer_state_dict'] = optimizer.state_dict()        
-        checkpoint_data['scheduler_state_dict'] = scheduler.state_dict()
         checkpoint_path = os.path.join(args.dir_output, "checkpoint.tar")
         torch.save(checkpoint_data, checkpoint_path)            
 
@@ -379,10 +375,6 @@ def main():
                         default=1000000,
                         type=int,
                         help="Maximum number of training steps to perform. Note: # optimization steps = # train steps / # accumulation steps.")
-    parser.add_argument("--num_warmup_steps",
-                        default=10000,
-                        type=int,
-                        help="Number of optimization steps (i.e. training steps / accumulation steps) to perform linear learning rate warmup for. ")
     parser.add_argument('--grad_accum_steps',
                         type=int,
                         default=1,
@@ -581,7 +573,7 @@ def main():
         
     # Training
     if args.do_train:
-        # Prepare optimizer and scheduler
+        # Prepare optimizer
         checkpoint_data["global_step"] = 0
         checkpoint_data["max_opt_steps"] = args.max_train_steps // args.grad_accum_steps
         num_opt_steps_per_epoch = int(len(train_dataset) / args.train_batch_size / args.grad_accum_steps)
@@ -603,10 +595,6 @@ def main():
                           lr=args.learning_rate,
                           betas=betas,
                           correct_bias=args.correct_bias) # To reproduce BertAdam specific behaviour, use correct_bias=False
-        logger.info("Preparing learning rate scheduler...")
-        scheduler = get_linear_schedule_with_warmup(optimizer,
-                                                    num_warmup_steps=args.num_warmup_steps,
-                                                    num_training_steps=checkpoint_data["max_opt_steps"])
 
         # Log some info before training
         logger.info("*** Training info: ***")
@@ -639,7 +627,6 @@ def main():
               pooler,
               classifier,
               optimizer,
-              scheduler,
               train_dataset,
               args,
               checkpoint_data,
