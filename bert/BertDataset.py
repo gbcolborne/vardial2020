@@ -2,6 +2,7 @@
 
 import sys, os, random, logging
 from io import open
+from copy import deepcopy
 import numpy as np
 import torch
 from torch.utils.data import Dataset
@@ -67,6 +68,8 @@ def mask_random_tokens(tokens, tokenizer):
     :return: (list of str, list of int), masked tokens and related labels for LM prediction
     """
     output_label = []
+    # Copy tokens so that we don't modify the input list.
+    tokens = deepcopy(tokens)
     for i, token in enumerate(tokens):
         prob = random.random()
         # mask token with 15% probability
