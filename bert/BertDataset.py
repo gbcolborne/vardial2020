@@ -358,7 +358,7 @@ class BertDatasetForMLM(BertDatasetForTraining):
         assert len(lm_label_ids) == self.seq_len
         
         if self.verbose and example.guid < 5:
-            logger.info("*** Example ***")
+            logger.info("*** Example (BertDatasetForMLM) ***")
             logger.info("guid: {}".format(example.guid))
             logger.info("tokens: {}".format(tokens))
             logger.info("input_ids: {}".format(input_ids))
