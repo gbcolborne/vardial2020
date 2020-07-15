@@ -16,6 +16,7 @@ def check_test_set(dir_data, train_langs, part):
     for lang in sorted(train_langs):
         if lang not in lang2test:
             print("  %s: no test texts for this language" % lang)
+            continue
         path_train = os.path.join(dir_data, "%s.train" % lang)
         test_texts = set(lang2test[lang])
         nb_errors = 0
