@@ -2,13 +2,20 @@
 
 import os, argparse
 
+PATH_JOB_TEMPLATE = "jobs/template.job"
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("dir_pretrained_model", type=str)
     parser.add_argument("max_train_steps", type=int)
+    parser.add_argument("dir_output_jobs", type=str)
     args = parser.parse_args()
-
+    if os.path.exists(args.dir_output_jobs) and len(os.listdir(args.dir_output_jobs)):
+        msg = "dir_output_jobs (%s) is not empty" % args.dir_output_jobs
+        raise RuntimeError(msg)
+    if not os.path.exists(args.dir_output_jobs):
+        os.makedirs(args.dir_output_jobs)
+        
     settings = {}
     settings["train_batch_size"] = ["16", "32"]
     settings["seq_len"] = ["128", "256"]
@@ -34,8 +41,12 @@ def main():
     combinations = filtered
     print("Nb combinations remaining after filtering: %d" % len(combinations))
 
-    # Write commands (assume working directory is vardial/bert, and both the pretrained model and the finetuned model are saved here)
-    for (bs, sl, lr, gs) in combinations:
+    # Get template for job files
+    with open(PATH_JOB_TEMPLATE) as f:
+        job_template = f.read().strip()
+    
+    # Write job files (assume working directory is vardial/bert, and both the pretrained model and the finetuned model are saved here)
+    for i, (bs, sl, lr, gs) in enumerate(combinations):
         # Encode settings in output directory path
         dir_output = "Finetune_bs=%s_sl=%s_lr=%s_gs=%s" % (bs, sl, lr, gs)        
 
@@ -50,7 +61,14 @@ def main():
         cmd += " --grad_accum_steps %s" % gs
         cmd += " --learning_rate %s" % lr
         cmd += " --dir_output %s" % dir_output
-        print(cmd)
+
+        # Write
+        path = os.path.join(args.dir_output_jobs, "ft.%02d.job" % (i+1))
+        with open(path, 'w') as f:
+            f.write(job_template)
+            f.write("\n")
+            f.write(cmd)
+    print("%d job files written in %s.\n" % (len(combinations), args.dir_output_jobs))
     
 if __name__ == "__main__":
     main()
