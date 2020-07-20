@@ -354,7 +354,7 @@ def main():
                         type=int,
                         help="Total batch size for training.")
     parser.add_argument("--eval_batch_size",
-                        default=16,
+                        default=64,
                         type=int,
                         help="Total batch size for evaluation.")
     parser.add_argument("--seq_len",
