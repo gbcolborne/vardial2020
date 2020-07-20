@@ -1,6 +1,8 @@
 import argparse
+import numpy as np
 from sklearn.metrics import precision_recall_fscore_support as prfs
 from sklearn.metrics import multilabel_confusion_matrix as mcm
+from sklearn.metrics import confusion_matrix
 from comp_utils import ALL_LANGS, RELEVANT_LANGS
 
 
@@ -164,6 +166,24 @@ def main():
     gold = load_labels(args.path_gold)
     fscore_dict = compute_fscores(pred, gold, verbose=True)
     print("\n\n")
+
+    # Show confusion matrix for relevant languages
+    labels = sorted(ALL_LANGS)
+    label2id = {x:i for (i,x) in enumerate(labels)}
+    conf = confusion_matrix(gold, pred)
+    print("Most frequent prediction for the relevant languages:")
+    for label in sorted(RELEVANT_LANGS):
+        label_id = label2id[label]
+        srt = np.argsort(conf[label_id])
+        argmax = srt[-1]
+        most_confused = labels[argmax]
+        if most_confused in RELEVANT_LANGS:
+            group = "relevant"
+        else:
+            group = "irrelevant"
+        print("- {}: {} ({})".format(label, most_confused, group))
+
+
     
 if __name__ == "__main__":
     main()
