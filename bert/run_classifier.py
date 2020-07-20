@@ -537,7 +537,7 @@ def main():
     if "pooler_state_dict" in checkpoint_data:
         logger.info("Loading pooler...")
         pooler_config = checkpoint_data["pooler_config"]
-        pooler = Pooler(model.config.hidden_size, cls_only=pooler_config["avgpool"]))
+        pooler = Pooler(model.config.hidden_size, cls_only=pooler_config["avgpool"])
     else:
         logger.info("Making pooler...")
         pooler = Pooler(model.config.hidden_size, cls_only=(not args.avgpool))
