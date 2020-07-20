@@ -896,7 +896,7 @@ class BertDatasetForTesting(Dataset):
 
         # Get label ID
         if label is None:
-            label_id is None
+            label_id = None
         else:
             label_id = self.label2id[label]
         
