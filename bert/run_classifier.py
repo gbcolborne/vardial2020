@@ -536,9 +536,12 @@ def main():
     # Create pooler and classifier, load pretrained weights if present
     if "pooler_state_dict" in checkpoint_data:
         logger.info("Loading pooler...")
+        pooler_config = checkpoint_data["pooler_config"]
+        pooler = Pooler(model.config.hidden_size, cls_only=pooler_config["avgpool"]))
     else:
         logger.info("Making pooler...")
-    pooler = Pooler(model.config.hidden_size, cls_only=(not args.avgpool))
+        pooler = Pooler(model.config.hidden_size, cls_only=(not args.avgpool))
+        checkpoint_data["pooler_config"] = {"avgpool": args.avgpool}
     if "pooler_state_dict" in checkpoint_data:
         pooler.load_state_dict(checkpoint_data["pooler_state_dict"])
     pooler.to(args.device)
