@@ -830,7 +830,7 @@ class BertDatasetForTesting(Dataset):
                     # Empty line
                     continue
                 elif len(elems) == 1:
-                    if self.requre_labels:
+                    if self.require_labels:
                         msg = "only once column found, but require_labels is True"
                         raise RuntimeError(msg)
                     text = elems[0]
