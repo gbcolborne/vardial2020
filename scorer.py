@@ -5,16 +5,25 @@ from comp_utils import ALL_LANGS, RELEVANT_LANGS
 
 
 def load_labels(path):
-    """Load labels (i.e. ISO language codes) from text file (one per
-    line).
+    """Load labels (i.e. ISO language codes) from file. This file can
+    contain a single column of labels, or 2 columns (separated by a tab),
+    containing the example and label. Empty lines are skipped.
 
     """
     with open(path) as f:
         labels = []
-        for x in f.readlines():
-            x = x.strip()
-            assert x in ALL_LANGS
-            labels.append(x)
+        for line in f.readlines():
+            elems = line.strip().split("\t")
+            label = None
+            if len(elems) == 0:
+                continue
+            if len(elems) == 1:
+                label = elems[0]
+            if len(elems) == 2:
+                label = elems[1]
+            assert label is not None
+            assert label in ALL_LANGS
+            labels.append(label)
         return labels
 
     
