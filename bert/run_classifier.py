@@ -140,6 +140,8 @@ def train(model, pooler, classifier, optimizer, train_dataset, args, checkpoint_
 
     # Start training
     logger.info("***** Running training *****")
+    if args.eval_during_training:
+        best_score = -1
     for epoch in trange(int(args.num_epochs), desc="Epoch"):
         model.train()
         pooler.train()
@@ -296,15 +298,23 @@ def train(model, pooler, classifier, optimizer, train_dataset, args, checkpoint_
             f.write("\t".join(log_data)+"\n")
 
         # Save checkpoint
-        model_to_save = model.module if hasattr(model, 'module') else model
-        pooler_to_save = pooler.module if hasattr(pooler, 'module') else pooler
-        classifier_to_save = classifier.module if hasattr(classifier, 'module') else classifier        
-        checkpoint_data['model_state_dict'] = model_to_save.state_dict()
-        checkpoint_data['pooler_state_dict'] = pooler_to_save.state_dict()
-        checkpoint_data['classifier_state_dict'] = classifier_to_save.state_dict()        
-        checkpoint_data['optimizer_state_dict'] = optimizer.state_dict()        
-        checkpoint_path = os.path.join(args.dir_output, "checkpoint.tar")
-        torch.save(checkpoint_data, checkpoint_path)            
+        save = True
+        if args.eval_during_training:
+            current_score = dev_scores[args.score_to_optimize]
+            if current_score > best_score:
+                best_score = current_score
+            else:
+                save = False
+        if save:
+            model_to_save = model.module if hasattr(model, 'module') else model
+            pooler_to_save = pooler.module if hasattr(pooler, 'module') else pooler
+            classifier_to_save = classifier.module if hasattr(classifier, 'module') else classifier        
+            checkpoint_data['model_state_dict'] = model_to_save.state_dict()
+            checkpoint_data['pooler_state_dict'] = pooler_to_save.state_dict()
+            checkpoint_data['classifier_state_dict'] = classifier_to_save.state_dict()        
+            checkpoint_data['optimizer_state_dict'] = optimizer.state_dict()
+            checkpoint_path = os.path.join(args.dir_output, "checkpoint.tar")
+            torch.save(checkpoint_data, checkpoint_path)            
 
         
 def main():
@@ -340,6 +350,12 @@ def main():
                         action="store_true",
                         help="Run prediction on test set")
 
+    # Score to optimize on dev set (by early stopping)
+    parser.add_argument("--score_to_optimize",
+                        choices=["track1", "track2", "track3"],
+                        default="track3",
+                        help="Score to optimize on dev set during training (by early stopping).")
+    
     # Hyperparameters
     parser.add_argument("--avgpool",
                         action="store_true",
@@ -536,14 +552,18 @@ def main():
     # Create pooler and classifier, load pretrained weights if present
     if "pooler_state_dict" in checkpoint_data:
         logger.info("Loading pooler...")
-        pooler_config = checkpoint_data["pooler_config"]
-        pooler = Pooler(model.config.hidden_size, cls_only=pooler_config["avgpool"])
+        if args.do_train:
+            pooler = Pooler(model.config.hidden_size, cls_only=(not args.avgpool))
+        else:
+            # If we are just evaluating the model, then we load the
+            # pooler config to see whether we do --avgpool.
+            pooler_config = checkpoint_data["pooler_config"]
+            pooler = Pooler(model.config.hidden_size, cls_only=pooler_config["avgpool"])
+        pooler.load_state_dict(checkpoint_data["pooler_state_dict"])
     else:
         logger.info("Making pooler...")
         pooler = Pooler(model.config.hidden_size, cls_only=(not args.avgpool))
         checkpoint_data["pooler_config"] = {"avgpool": args.avgpool}
-    if "pooler_state_dict" in checkpoint_data:
-        pooler.load_state_dict(checkpoint_data["pooler_state_dict"])
     pooler.to(args.device)
     if "classifier_state_dict" in checkpoint_data:
         logger.info("Loading classifier...")
