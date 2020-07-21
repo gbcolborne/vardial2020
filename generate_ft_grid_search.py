@@ -19,10 +19,10 @@ def main():
 
     # Fixed params
     max_train_steps = "75000"
-    train_batch_size = "16"
-    seq_len = "256"
+    train_batch_size = "32"
+    seq_len = "128"
     sampling_distro = "dampfreq"
-    score_to_optimize = "track1"
+    score_to_optimize = "track3"
     
     # Tuned hparams
     settings = {}
