@@ -16,6 +16,8 @@ score_name = "DevF1Track" + str(args.track)
 model_dirs = os.listdir(args.dir_models)
 all_settings = []
 all_scores = []
+all_best_epochs = []
+all_best_steps = []
 for d in model_dirs:
     # Parse directory name, which encodes hparam settings
     settings = {}
@@ -34,16 +36,31 @@ for d in model_dirs:
         col_names = header.split("\t")
         score_col_ix = col_names.index(score_name)
         scores = []
+        steps = []
         for line in f:
             cols = line.strip().split("\t")
             scores.append(float(cols[score_col_ix]))
+            steps.append(int(cols[0]))
     if USE_BEST_SCORE:
         score = max(scores)
     else:
         score = scores[-1]
+    # Get training step at which the best score was achieved
+    best_ix = None
+    best_score = -1
+    for ix, score in enumerate(scores):
+        if score > best_score:
+            best_score = score
+            best_ix = ix
+    best_step = steps[best_ix]
+    if USE_BEST_SCORE:
+        score = scores[best_ix]
+    else:
+        score = scores[-1]
     all_settings.append(settings)
     all_scores.append(score)
-
+    all_best_epochs.append(best_ix)
+    all_best_steps.append(best_step)
 
 # Analyze scores wrt hparam settings
 hparam_names = list(all_settings[0].keys())
@@ -59,3 +76,5 @@ for hname in hparam_names:
         print("- %s" % val)
         print("  - mean score: %f" % np.mean(hval_to_scores[val])) 
         print("  - max score: %f" % max(hval_to_scores[val])) 
+print("\n\nMean best epoch: {}".format(np.mean(all_best_epochs)))
+print("Mean best step: {}".format(np.mean(all_best_steps)))
