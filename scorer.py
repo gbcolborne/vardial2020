@@ -174,15 +174,38 @@ def main():
     print("Most frequent prediction for the relevant languages:")
     for label in sorted(RELEVANT_LANGS):
         label_id = label2id[label]
+        conf_sub.append(conf[label_id])
         srt = np.argsort(conf[label_id])
         argmax = srt[-1]
         most_confused = labels[argmax]
-        if most_confused in RELEVANT_LANGS:
-            group = "relevant"
+        if most_confused == label:
+            print("- {}: {}".format(label, most_confused))
         else:
-            group = "irrelevant"
-        print("- {}: {} ({})".format(label, most_confused, group))
-
+            if most_confused in RELEVANT_LANGS:
+                group = "relevant"
+            else:
+                group = "irrelevant"
+            print("- {}: {} ({})".format(label, most_confused, group))
+    
+                            
+    # Now show confusion matrix for irrelevant languages
+    print()
+    print("Most frequent prediction for the irrelevant languages:")
+    irrelevant_langs = ALL_LANGS.difference(RELEVANT_LANGS)
+    for label in sorted(irrelevant_langs):
+        label_id = label2id[label]
+        srt = np.argsort(conf[label_id])
+        argmax = srt[-1]
+        most_confused = labels[argmax]
+        if most_confused == label:
+            print("- {}: {}".format(label, most_confused))
+        else:
+            if most_confused in RELEVANT_LANGS:
+                group = "relevant"
+            else:
+                group = "irrelevant"
+            print("- {}: {} ({})".format(label, most_confused, group))
+    
 
     
 if __name__ == "__main__":
