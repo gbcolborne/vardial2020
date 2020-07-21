@@ -76,5 +76,5 @@ for hname in hparam_names:
         print("- %s" % val)
         print("  - mean score: %f" % np.mean(hval_to_scores[val])) 
         print("  - max score: %f" % max(hval_to_scores[val])) 
-print("\n\nMean best epoch: {}".format(np.mean(all_best_epochs)))
-print("Mean best step: {}".format(np.mean(all_best_steps)))
+print("\nMean best epoch: {}".format(np.mean(all_best_epochs)))
+print("Mean best step: {}\n".format(np.mean(all_best_steps)))
