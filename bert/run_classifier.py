@@ -554,6 +554,7 @@ def main():
         logger.info("Loading pooler...")
         if args.do_train:
             pooler = Pooler(model.config.hidden_size, cls_only=(not args.avgpool))
+            checkpoint_data["pooler_config"] = {"avgpool": args.avgpool}
         else:
             # If we are just evaluating the model, then we load the
             # pooler config to see whether we do --avgpool.
