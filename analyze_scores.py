@@ -8,9 +8,9 @@ parser.add_argument("dir_models")
 parser.add_argument("track", type=int, choices=[1,2,3])
 args = parser.parse_args()
 
-USE_BEST_SCORE = False # If True, a model's score is its best score
-                       # across epochs. Otherwise, we use the score at
-                       # the end of training.
+USE_BEST_SCORE = True # If True, a model's score is its best score
+                      # across epochs. Otherwise, we use the score at
+                      # the end of training.
 
 score_name = "DevF1Track" + str(args.track)
 model_dirs = os.listdir(args.dir_models)
