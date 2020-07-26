@@ -125,7 +125,8 @@ def main():
             logger.info("  %s (%d/%d)" % (lang, nb_train, nb_dev))
 
         if nb_dev == 0:
-            assert nb_test == 0
+            if args.add_test_set:
+                assert nb_test == 0
             # No dev or test sentences to sample
             for i, (text,text_id,url) in enumerate(stream_sents(lang, args.input_dir)):
                 f_train.write(build_example(text, lang) + "\n")
@@ -182,7 +183,7 @@ def main():
             f_train.write(build_example(text, lang) + "\n")            
         if nb_dev_written != nb_dev:
             raise ValueError("Expected {} but got {}.".format(nb_dev, nb_dev_written))
-        if nb_test_written != nb_test:
+        if args.add_test_set and nb_test_written != nb_test:
             raise ValueError("Expected {} but got {}.".format(nb_test, nb_test_written))
     f_train.close()
     f_dev.close()
