@@ -11,7 +11,7 @@ from transformers import BertForMaskedLM, BertConfig
 from transformers import AdamW
 from tqdm import tqdm, trange
 from CharTokenizer import CharTokenizer
-from BertDataset import BertDatasetForClassification, BertDatasetForMLM, BertDatasetForTesting
+from BertDataset import BertDatasetForClassification, BertDatasetForMLM, BertDatasetForTesting, NO_MASK_LABEL
 from Pooler import Pooler
 from Classifier import Classifier
 from utils import check_for_unk_train_data, adjust_loss, weighted_avg, count_params, accuracy, get_dataloader
@@ -244,10 +244,10 @@ def train(model, pooler, classifier, optimizer, train_dataset, args, checkpoint_
             # Compute accuracies
             lid_acc = accuracy(lid_scores, label_ids)
             lid_accs.append(lid_acc)
-            mlm_acc = accuracy(mlm_pred_scores.view(-1, model.config.vocab_size), lm_label_ids.view(-1))
+            mlm_acc = accuracy(mlm_pred_scores.view(-1, model.config.vocab_size), lm_label_ids.view(-1), ignore_label=NO_MASK_LABEL)
             mlm_accs.append(mlm_acc)
             if unk_dataset is not None:
-                unk_mlm_acc = accuracy(unk_mlm_pred_scores.view(-1, model.config.vocab_size), xlm_label_ids.view(-1))
+                unk_mlm_acc = accuracy(unk_mlm_pred_scores.view(-1, model.config.vocab_size), xlm_label_ids.view(-1), ignore_label=NO_MASK_LABEL)
                 unk_mlm_accs.append(unk_mlm_acc)
 
             # Check if we accumulate grad or do an optimization step
