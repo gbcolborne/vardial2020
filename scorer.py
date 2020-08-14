@@ -1,6 +1,5 @@
 import argparse
 import numpy as np
-from sklearn.metrics import precision_recall_fscore_support as prfs
 from sklearn.metrics import multilabel_confusion_matrix as mcm
 from sklearn.metrics import confusion_matrix
 from comp_utils import ALL_LANGS, RELEVANT_LANGS
@@ -67,13 +66,19 @@ def compute_fscores(pred, gold, verbose=False):
         print("- Average (macro) F1-score: %.4f" % fscore1)
             
     # For track 2, the score is the micro-averaged f1-score over
-    # sentences.
-    p,r,fscore2,_ = prfs(gold_filtered,
-                         pred_filtered,
-                         beta=1.0,
-                         labels=None,
-                         average="micro",
-                         zero_division=0)
+    # sentences. Precision is computed wrt to cases where either the
+    # predicted label or the gold label is a relevant language. Recall
+    # is computed wrt to cases where the gold label is a relevant
+    # language.
+    nb_correct = sum(1 for i in range(len(gold_filtered)) if pred_filtered[i] == gold_filtered[i])
+    nb_relevant_gold = sum(1 for i in range(len(gold_filtered)) if gold_filtered[i] in RELEVANT_LANGS)
+    p = nb_correct / len(pred_filtered)
+    r = nb_correct / nb_relevant_gold
+    if p == 0 and r == 0:
+        fscore2 = 0
+    else:
+        fscore2 = 2 * p * r / (p + r)
+
     if verbose:
         title = "Results (Track 2)"
         print_title_with_border(title)
@@ -174,7 +179,6 @@ def main():
     print("Most frequent prediction for the relevant languages:")
     for label in sorted(RELEVANT_LANGS):
         label_id = label2id[label]
-        conf_sub.append(conf[label_id])
         srt = np.argsort(conf[label_id])
         argmax = srt[-1]
         most_confused = labels[argmax]

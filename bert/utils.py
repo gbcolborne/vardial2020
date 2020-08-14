@@ -17,13 +17,20 @@ def get_dataloader(dataset, batch_size, local_rank, shuffle=True):
     return DataLoader(dataset, sampler=sampler, batch_size=batch_size)
 
 
-def accuracy(pred_scores, labels):
+def accuracy(pred_scores, labels, ignore_label=None):
     """ Compute accuracy. """
     ytrue = labels.cpu().numpy()
-    ypred = pred_scores.detach().cpu().numpy()    
+    assert len(ytrue.shape) == 1    
+    ypred = pred_scores.detach().cpu().numpy()
     ypred = np.argmax(ypred, axis=1)
-    assert len(ytrue) == len(ypred)
-    accuracy = np.sum(ypred == ytrue)/len(ytrue)
+    assert len(ypred.shape) == 1
+    assert ypred.shape == ytrue.shape
+    if ignore_label is not None:
+        keep = np.where(ytrue != ignore_label)
+        ytrue = ytrue[keep]
+        ypred = ypred[keep]
+    nb_correct = np.sum(ypred == ytrue)
+    accuracy = nb_correct / ytrue.shape[0]
     return accuracy
 
 

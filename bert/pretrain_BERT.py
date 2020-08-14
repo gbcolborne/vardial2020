@@ -15,7 +15,7 @@ from transformers import AdamW
 from transformers.optimization import get_linear_schedule_with_warmup
 from tqdm import tqdm, trange
 from CharTokenizer import CharTokenizer
-from BertDataset import BertDatasetForMLM, BertDatasetForSPCAndMLM
+from BertDataset import BertDatasetForMLM, BertDatasetForSPCAndMLM, NO_MASK_LABEL
 from Pooler import Pooler
 from utils import check_for_unk_train_data, adjust_loss, weighted_avg, count_params, accuracy, get_dataloader
 
@@ -183,13 +183,13 @@ def train(model, pooler, tokenizer, optimizer, scheduler, dataset, args, checkpo
             grad_norms.append(training_grad_norm)
 
             # Compute accuracies
-            query_mlm_acc = accuracy(mlm_pred_scores.view(-1, model.config.vocab_size), lm_label_ids.view(-1))
+            query_mlm_acc = accuracy(mlm_pred_scores.view(-1, model.config.vocab_size), lm_label_ids.view(-1), ignore_label=NO_MASK_LABEL)
             query_mlm_accs.append(query_mlm_acc)
             if not args.mlm_only:
                 spc_acc = accuracy(spc_scores, cand_labels)
                 spc_accs.append(spc_acc)
             if extra_mlm_dataset is not None:
-                extra_mlm_acc = accuracy(extra_mlm_pred_scores.view(-1, model.config.vocab_size), xlm_label_ids.view(-1))
+                extra_mlm_acc = accuracy(extra_mlm_pred_scores.view(-1, model.config.vocab_size), xlm_label_ids.view(-1), ignore_label=NO_MASK_LABEL)
                 extra_mlm_accs.append(extra_mlm_acc)
 
             # Check if we accumulate grad or do an optimization step
