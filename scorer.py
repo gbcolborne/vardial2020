@@ -166,50 +166,53 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("path_pred", help="Path of predicted labels, i.e. ISO language codes (one per line)")
     parser.add_argument("path_gold", help="Path of gold labels, i.e. ISO language codes (one per line)")
+    parser.add_argument("--show_confusion", help="Show some information on the confusion matrix.")
     args = parser.parse_args()
     pred = load_labels(args.path_pred)
     gold = load_labels(args.path_gold)
     fscore_dict = compute_fscores(pred, gold, verbose=True)
     print("\n\n")
 
-    # Show confusion matrix for relevant languages
-    labels = sorted(ALL_LANGS)
-    label2id = {x:i for (i,x) in enumerate(labels)}
-    conf = confusion_matrix(gold, pred)
-    print("Most frequent prediction for the relevant languages:")
-    for label in sorted(RELEVANT_LANGS):
-        label_id = label2id[label]
-        srt = np.argsort(conf[label_id])
-        argmax = srt[-1]
-        most_confused = labels[argmax]
-        if most_confused == label:
-            print("- {}: {}".format(label, most_confused))
-        else:
-            if most_confused in RELEVANT_LANGS:
-                group = "relevant"
+    if args.show_confusion:
+        
+    
+        # Show confusion matrix for relevant languages
+        labels = sorted(ALL_LANGS)
+        label2id = {x:i for (i,x) in enumerate(labels)}
+        conf = confusion_matrix(gold, pred, labels=labels)
+        print("Most frequent prediction for the relevant languages:")
+        for label in sorted(RELEVANT_LANGS):
+            label_id = label2id[label]
+            srt = np.argsort(conf[label_id])
+            argmax = srt[-1]
+            most_confused = labels[argmax]
+            if most_confused == label:
+                print("- {}: {}".format(label, most_confused))
             else:
-                group = "irrelevant"
-            print("- {}: {} ({})".format(label, most_confused, group))
+                if most_confused in RELEVANT_LANGS:
+                    group = "relevant"
+                else:
+                    group = "irrelevant"
+                print("- {}: {} ({})".format(label, most_confused, group))
     
                             
-    # Now show confusion matrix for irrelevant languages
-    print()
-    print("Most frequent prediction for the irrelevant languages:")
-    irrelevant_langs = ALL_LANGS.difference(RELEVANT_LANGS)
-    for label in sorted(irrelevant_langs):
-        label_id = label2id[label]
-        srt = np.argsort(conf[label_id])
-        argmax = srt[-1]
-        most_confused = labels[argmax]
-        if most_confused == label:
-            print("- {}: {}".format(label, most_confused))
-        else:
-            if most_confused in RELEVANT_LANGS:
-                group = "relevant"
+        # Now show confusion matrix for irrelevant languages
+        print()
+        print("Most frequent prediction for the irrelevant languages:")
+        irrelevant_langs = ALL_LANGS.difference(RELEVANT_LANGS)
+        for label in sorted(irrelevant_langs):
+            label_id = label2id[label]
+            srt = np.argsort(conf[label_id])
+            argmax = srt[-1]
+            most_confused = labels[argmax]
+            if most_confused == label:
+                print("- {}: {}".format(label, most_confused))
             else:
-                group = "irrelevant"
-            print("- {}: {} ({})".format(label, most_confused, group))
-    
+                if most_confused in RELEVANT_LANGS:
+                    group = "relevant"
+                else:
+                    group = "irrelevant"
+                print("- {}: {} ({})".format(label, most_confused, group))
 
     
 if __name__ == "__main__":
