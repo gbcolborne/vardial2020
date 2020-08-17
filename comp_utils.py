@@ -153,12 +153,18 @@ def extract_text_id_and_url(line, lang):
     return (text, text_id, url)
 
 
-def stream_sents(lang, dir_training_data):
+def stream_sents(lang, dir_training_data, input_format="source"):
     """Stream sentences (along with their URL) from training data. Skip empty lines."""
+    assert input_format in ["source", "text-only"]
     path = get_path_for_lang(lang, dir_training_data)
     with open(path) as f:
         for line in f:
-            text, text_id, url = extract_text_id_and_url(line, lang)
+            if input_format == "source":
+                text, text_id, url = extract_text_id_and_url(line, lang)
+            elif input_format == "text-only":
+                text = line.strip()
+                text_id = None
+                url = None
             if len(text):
                 yield (text, text_id, url)
                 
