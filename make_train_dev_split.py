@@ -22,6 +22,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--add_test_set", action="store_true",
                         help="Make a test set using the same distribution and sampling method as the dev set")
+    parser.add_argument("--split_train_by_lang", action="store_true",
+                        help="Instead of a single file called 'train.tsv', write one file per lang, called '<lang>.train'.")
     parser.add_argument("rel_size", type=int, 
                         help="Number of relevant sentences in dev set")
     parser.add_argument("con_size", type=int, 
@@ -43,7 +45,14 @@ def main():
         assert os.path.isdir(args.output_dir) and len(os.listdir(args.output_dir)) == 0
     else:
         os.makedirs(args.output_dir)
-    
+
+    # We expect that the input dir contains n files called lang.train, which contain unlabeled text (without labels, URLS or text IDs)
+    for n in os.listdir(args.input_dir):
+        cut = n.index(".")
+        lang = n[:cut]
+        assert lang in ALL_LANGS
+        assert n[cut+1:] == "train"
+        
     # Set up logging
     logger = logging.getLogger(__name__)
     logging.basicConfig(format = '%(asctime)s - %(levelname)s - %(name)s -   %(message)s',
@@ -52,9 +61,10 @@ def main():
 
     # Seed RNG
     random.seed(91500)
-
+    np.random.seed(91500)
+    
     # Get all langs
-    langs = sorted(ALL_LANGS.keys())
+    langs = sorted(ALL_LANGS)
     rel_langs = sorted(RELEVANT_LANGS)
     con_langs = sorted(IRRELEVANT_URALIC_LANGS)
     irr_langs = sorted(set(langs).difference(rel_langs + con_langs))
@@ -69,7 +79,7 @@ def main():
     lang2freq = {}
     for lang in langs:
         logger.info("  " + lang)
-        lang2freq[lang] = sum(1 for (sent, text_id, url) in stream_sents(lang, args.input_dir))
+        lang2freq[lang] = sum(1 for (sent, text_id, url) in stream_sents(lang, args.input_dir, input_format="text-only"))
     if args.balance_rel:
         rel_probs = np.ones(len(rel_langs), dtype=float) / len(rel_langs)
     else:
@@ -92,9 +102,16 @@ def main():
     irr_dev_counts = [int(x) for x in saferound(irr_probs * args.irr_size, 0, "largest")]
 
     # Make train/dev split
-    path_train = os.path.join(args.output_dir, "train.tsv")
+    if args.split_train_by_lang:
+        lang_to_path_train = {}
+        lang_to_f_train = {}        
+        for lang in langs:
+            lang_to_path_train[lang] = os.path.join(args.output_dir, "%s.train" % lang)
+            lang_to_f_train[lang] = open(lang_to_path_train[lang], 'w')
+    else:
+        path_train = os.path.join(args.output_dir, "train.tsv")
+        f_train = open(path_train, 'w')
     path_dev = os.path.join(args.output_dir, "valid.tsv")
-    f_train = open(path_train, 'w')
     f_dev = open(path_dev, 'w')
     if args.add_test_set:
         path_test = os.path.join(args.output_dir, "test.tsv")
@@ -106,6 +123,8 @@ def main():
         title = "lang (train/dev)"
     log_title_with_border(logger, title)
     for lang in langs:
+        if args.split_train_by_lang:
+            f_train = lang_to_f_train[lang]
         nb_sents = int(lang2freq[lang])
         all_indices = list(range(nb_sents))
 
@@ -128,7 +147,7 @@ def main():
             if args.add_test_set:
                 assert nb_test == 0
             # No dev or test sentences to sample
-            for i, (text,text_id,url) in enumerate(stream_sents(lang, args.input_dir)):
+            for i, (text,text_id,url) in enumerate(stream_sents(lang, args.input_dir, input_format="text-only")):
                 f_train.write(build_example(text, lang) + "\n")
             continue
         
@@ -152,7 +171,7 @@ def main():
         nb_dev_written = 0
         nb_test_written = 0
         only_train_left = False
-        for i, (text,text_id,url) in enumerate(stream_sents(lang, args.input_dir)):
+        for i, (text,text_id,url) in enumerate(stream_sents(lang, args.input_dir, input_format="text-only")):
             if only_train_left:
                 f_train.write(build_example(text, lang) + "\n")
                 continue
@@ -185,10 +204,34 @@ def main():
             raise ValueError("Expected {} but got {}.".format(nb_dev, nb_dev_written))
         if args.add_test_set and nb_test_written != nb_test:
             raise ValueError("Expected {} but got {}.".format(nb_test, nb_test_written))
-    f_train.close()
+    if args.split_train_by_lang:
+        for lang in langs:
+            lang_to_f_train[lang].close()
+    else:
+        f_train.close()
     f_dev.close()
-    for _ in range(5):
-        logger.warning(" !!! YOU SHOULD SHUFFLE THE DATASET, AS IT IS ORDERED BY LANG !!! ")
+    if args.add_test_set:
+        f_test.close()
+
+
+    def shuffle_and_overwrite(path):
+        with open(path, 'r') as f:
+            lines = [line.rstrip() for line in f]
+        np.random.shuffle(lines)
+        with open(path, 'w') as f:
+            for line in lines:
+                f.write(line + "\n")
+        return
+        
+    # Shuffle train, dev and test sets, overwrite
+    if not args.split_train_by_lang:
+        shuffle_and_overwrite(path_train)
+    else:
+        for lang in langs:
+            shuffle_and_overwrite(lang_to_path_train[lang])
+    shuffle_and_overwrite(path_dev)
+    if args.add_test_set:
+        shuffle_and_overwrite(path_test)
     return
 
 
