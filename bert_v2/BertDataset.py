@@ -650,7 +650,7 @@ class BertDatasetForClassification(BertDatasetForTraining):
         tokens = tokens[:self.seq_len-2]
 
         # Mask tokens for MLM
-        if self.include_mlm
+        if self.include_mlm:
             masked_tokens, lm_label_ids = mask_random_tokens(tokens, self.tokenizer)
 
         # Add CLS and SEP
