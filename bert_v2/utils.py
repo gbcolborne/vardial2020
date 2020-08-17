@@ -1,21 +1,23 @@
 import os
 import numpy as np
 import torch
-from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
+from torch.utils.data import DataLoader, SequentialSampler
 from torch.utils.data.distributed import DistributedSampler
+from BertDataset import BertDatasetForTesting
 
 
-def get_dataloader(dataset, batch_size, local_rank, shuffle=True):
+def get_dataloader(dataset, batch_size, local_rank):
     """ Get data loader. """
-    if local_rank == -1:
-        if shuffle:            
-            sampler = RandomSampler(dataset)
-        else:
+    if isinstance(dataset, BertDatasetForTesting):
+        if local_rank == -1:
             sampler = SequentialSampler(dataset)            
+        else:
+            sampler = DistributedSampler(dataset, shuffle=false)
+        return DataLoader(dataset, sampler=sampler, batch_size=batch_size)
     else:
-        sampler = DistributedSampler(dataset, shuffle=shuffle)
-    return DataLoader(dataset, sampler=sampler, batch_size=batch_size)
-
+        # BertDatasetForTraining is an IterableDataset, so we don't use a sampler
+        return Dataloader(dataset, batch_size=batch_size)
+    
 
 def accuracy(pred_scores, labels, ignore_label=None):
     """ Compute accuracy. """
