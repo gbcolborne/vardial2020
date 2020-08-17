@@ -5,17 +5,10 @@ from io import open
 from copy import deepcopy
 import numpy as np
 import torch
-from torch.utils.data import Dataset
-from iteround import saferound
+from torch.utils.data import Dataset, IterableDataset
 sys.path.append("..")
-from comp_utils import RELEVANT_LANGS, IRRELEVANT_URALIC_LANGS, ALL_LANGS
+from comp_utils import RELEVANT_LANGS, IRRELEVANT_LANGS, IRRELEVANT_URALIC_LANGS, ALL_LANGS
 
-
-# Sample sizes of 3 language groups
-REL_SAMPLE_SIZE = 20000
-CON_SAMPLE_SIZE = 20000
-IRR_SAMPLE_SIZE = 20000
-UNK_SAMPLE_SIZE = 20000
 
 # Label used in BertForLM to indicate a token is not masked.
 NO_MASK_LABEL = -100
@@ -33,21 +26,11 @@ def check_for_unk_train_data(train_paths):
     return None
 
 
-def get_lang_group(lang):
-    if lang == "unk":
-        return "unk"
-    assert lang in ALL_LANGS
-    if lang in RELEVANT_LANGS:
-        return "rel"
-    elif lang in IRRELEVANT_URALIC_LANGS:
-        return "con"
-    else:
-        return "irr"
-
-
 def line_to_data(line, is_labeled):
-    """ Takes a line from a dataset (labeled or unlabeled), and returns the text and label. """
-    
+    """Takes a line from a dataset (labeled or unlabeled), and returns the
+    text and label.
+
+    """
     if is_labeled:
         elems = line.strip().split("\t")
         assert len(elems) == 2
@@ -55,17 +38,20 @@ def line_to_data(line, is_labeled):
         label = elems[1]
     else:
         text = line.strip()
+        # Make sure text is not labeled
+        assert text[-4] != "\t"
         label = None
     return (text, label)
 
 
 def mask_random_tokens(tokens, tokenizer):
-    """
-    Masking some random tokens for masked language modeling with probabilities as in the original BERT paper.
+    """Masking some random tokens for masked language modeling with
+    probabilities as in the original BERT paper.
 
     :param tokens: list of str, tokenized sentence.
     :param tokenizer: Tokenizer, object used for tokenization (we need it's vocab here)
     :return: (list of str, list of int), masked tokens and related labels for LM prediction
+
     """
     output_label = []
     # Copy tokens so that we don't modify the input list.
@@ -99,142 +85,167 @@ def mask_random_tokens(tokens, tokenizer):
     return tokens, output_label
 
 
-class BertDatasetForTraining(Dataset):
+class BertDatasetForTraining(IterableDataset):
 
     """Abstract class for BertDataset used for training. Implements
     sampling of data from disk, as we can not load all the training
-    data into memory. Subclasses must implement `__getitem__`, as well
-    as `resample`.
+    data into memory. Sets sampling probabilities. Subclasses must
+    implement `__iter__`. 
 
     """
 
-    def __init__(self, train_paths, tokenizer, seq_len, size, unk_only=False, sampling_distro="uniform", encoding="utf-8", seed=None, verbose=False):
-        assert sampling_distro in ["uniform", "relfreq", "dampfreq"]
+    def __init__(self, train_paths, tokenizer, seq_len, sampling_alpha=0.0, split_sampling=False, encoding="utf-8", seed=None, verbose=False):
+        super(BertDatasetForTraining).__init__()
+        assert sampling_alpha >= 0.0 and sampling_alpha <= 1.0
         self.tokenizer = tokenizer
         self.vocab = tokenizer.vocab
-        self.sampled_dataset_size = size # Expected size (will be enforced)        
-        self.unk_only = unk_only
         self.seq_len = seq_len # Includes CLS and SEP tokens
-        self.sampling_distro = sampling_distro
+        self.sampling_alpha = sampling_alpha
+        self.split_sampling = split_sampling
         self.encoding = encoding
         self.verbose = verbose
-        self.sample_counter = 0  # total number of examples sampled by calling __getitem__ (across all epochs)
-        self.total_dataset_size = 0
+        self.sample_counter = 0  # total number of examples sampled by calling the iterator returned by __iter__ 
+        self.size = 0 # Total size of dataset
         self.lang_list = []
         self.lang2id = {} # Maps to indices in lang_list
         self.lang2path = {}
         self.lang2file = {}
         self.lang2freq = {}
-        self.group2freq = {"rel":0, "con":0, "irr":0, "unk":0}
         self.lang2ix = {} # Maps to the current index in the training file
-        self.lang2samplesize = {}
-        
+        self.sample_probs = [] # Language sampling probabilities
+
+        # Seed RNG
         if seed:
             random.seed(seed)            
             np.random.seed(seed)
             torch.manual_seed(seed)
 
-        # Set train_paths
+        # Store paths of training files
         for path in sorted(train_paths):
             filename = os.path.split(path)[-1]
             assert filename[-6:] == ".train"
             cut = filename.rfind(".")
             lang = filename[:cut]
             assert lang in ALL_LANGS or lang == "unk"
-            if lang == "unk" or not self.unk_only:
-                self.lang2path[lang] = path                            
+            self.lang2path[lang] = path                            
         assert len(self.lang2path) > 0
-        if self.unk_only:
-            assert len(self.lang2path) == 1
-            assert 'unk' in self.lang2path
-                
+        self.lang_list = sorted(self.lang2path.keys())
+        self.lang2id = {x:i for i,x in enumerate(self.lang_list)}
+
+        # For the moment, I do not foresee a use case where we include
+        # both labeled and unlabeled data, so require that we only
+        # have one or the other.
+        if 'unk' in self.lang2id:
+            if len(self.lang2id) != 1:
+                msg = "Expected either 1 path to unlabeled training data (unk.train)"
+                msg += " or n paths to labeled training data (*.train), but not both."
+                raise RuntimeError(msg)
+        
         # Prepare training files to sample lazily from disk
-        for lang, path in sorted(self.lang2path.items(), key=lambda x:x[0], reverse=False):
-            # Open file to load lazily from disk later when we start sampling
-            self.lang2file[lang] = open(self.lang2path[lang], 'r', encoding=self.encoding)
-            self.lang2freq[lang] = 0
+        for lang in self.lang_list:
+            path = lang2path[lang]
+            logger.info("Processing %s" % path)            
+            # Open file to load lazily from disk later when we start iterating
+            self.lang2file[lang] = open(path, 'r', encoding=self.encoding)
             self.lang2ix[lang] = 0
             # Count examples
+            self.lang2freq[lang] = 0
             with open(path, 'r', encoding=self.encoding) as f:
-                logger.info("Processing %s" % path)
                 for line in f:
                     (text, label) = line_to_data(line, False)
                     if text is not None:
                         self.lang2freq[lang] += 1
-                        self.total_dataset_size += 1
-            # Check which of the 3 groups this lang belongs to
-            group = get_lang_group(lang)
-            self.group2freq[group] += self.lang2freq[lang]
-        self.lang_list = sorted(self.lang2freq.keys())
-        self.lang2id = {x:i for i,x in enumerate(self.lang_list)}
-        logger.info("Total dataset size: %d" % self.total_dataset_size)
-        logger.info("Sampled dataset size (expectected): %d" % self.sampled_dataset_size)
+        self.size = sum(self.lang2freq.values())
+        logger.info("Dataset size: %d" % self.size)
 
-        # Compute expected number of examples sampled from each language
-        self.lang2samplesize = self.compute_expected_sample_sizes()
-        logger.info("Sum of expected sample sizes per language: %d" % (sum(self.lang2samplesize.values())))
-        assert sum(self.lang2samplesize.values()) == self.sampled_dataset_size
+        # Compute sampling probabilities
+        self.sample_probs = self._compute_sampling_probs()
+
+        # Make buffer of sampled languages (if we have more than 1 language)
+        nb_langs = len(self.lang_list)
+        if nb_langs > 1:
+            self.sampled_lang_buffer_size = 10**6
+            self.sampled_lang_buffer = self._make_sampled_lang_buffer()
+            self.sampled_lang_buffer_ix = 0
         return
 
-
-    def __len__(self):
-        return self.sampled_dataset_size
     
+    def __len__(self):
+        return self.size
 
-    def compute_expected_sample_sizes(self):
-        if self.unk_only:
-            lang2samplesize = {'unk': self.sampled_dataset_size}
-            return lang2samplesize
-        
-        # Map langs in the 3 groups to IDs
-        rel_langs = sorted(RELEVANT_LANGS)
-        con_langs = sorted(IRRELEVANT_URALIC_LANGS)
-        irr_langs = sorted(ALL_LANGS.difference(RELEVANT_LANGS).difference(IRRELEVANT_URALIC_LANGS))
-        rel_lang2id = dict((l,i) for (i,l) in enumerate(rel_langs))
-        con_lang2id = dict((l,i) for (i,l) in enumerate(con_langs))
-        irr_lang2id = dict((l,i) for (i,l) in enumerate(irr_langs))
-        if self.sampling_distro == "uniform":
-            rel_probs = np.ones(len(rel_langs), dtype=float) / len(rel_langs)
-            con_probs = np.ones(len(con_langs), dtype=float) / len(con_langs)
-            irr_probs = np.ones(len(irr_langs), dtype=float) / len(irr_langs)
-        elif self.sampling_distro in ["relfreq", "dampfreq"]:
-            rel_counts = np.array([self.lang2freq[k] for k in rel_langs], dtype=np.float)
-            con_counts = np.array([self.lang2freq[k] for k in con_langs], dtype=np.float)
-            irr_counts = np.array([self.lang2freq[k] for k in irr_langs], dtype=np.float)
-            rel_probs = rel_counts / rel_counts.sum()
-            con_probs = con_counts / con_counts.sum()
-            irr_probs = irr_counts / irr_counts.sum()                            
-            if self.sampling_distro == "dampfreq":
-                rel_probs_damp = rel_probs ** 0.5
-                rel_probs = rel_probs_damp / rel_probs_damp.sum()
-                con_probs_damp = con_probs ** 0.5
-                con_probs = con_probs_damp / con_probs_damp.sum()                
-                irr_probs_damp = irr_probs ** 0.5
-                irr_probs = irr_probs_damp / irr_probs_damp.sum()                
-        rel_sample_sizes = [int(x) for x in saferound(rel_probs * REL_SAMPLE_SIZE, 0, "largest")]
-        con_sample_sizes = [int(x) for x in saferound(con_probs * CON_SAMPLE_SIZE, 0, "largest")]
-        irr_sample_sizes = [int(x) for x in saferound(irr_probs * IRR_SAMPLE_SIZE, 0, "largest")]
-        lang2samplesize = {}
-        for i,x in enumerate(rel_sample_sizes):
-            lang2samplesize[rel_langs[i]] = x
-        for i,x in enumerate(con_sample_sizes):
-            lang2samplesize[con_langs[i]] = x
-        for i,x in enumerate(irr_sample_sizes):
-            lang2samplesize[irr_langs[i]] = x
-        if 'unk' in self.lang2path:            
-            lang2samplesize['unk'] = UNK_SAMPLE_SIZE
-        logger.info("  # samples (relevant): %d" % sum(rel_sample_sizes))
-        logger.info("    Min samples/lang (relevant): %d" % min(rel_sample_sizes))
-        logger.info("    Max samples/lang (relevant): %d" % max(rel_sample_sizes))
-        logger.info("  # samples (confounders): %d" % sum(con_sample_sizes))        
-        logger.info("    Min samples/lang (confounders): %d" % min(con_sample_sizes))
-        logger.info("    Max samples/lang (confounders): %d" % max(con_sample_sizes))
-        logger.info("  # samples (irrelevant): %d" % sum(irr_sample_sizes))                
-        logger.info("    Min samples/lang (irrelevant): %d" % min(irr_sample_sizes))
-        logger.info("    Max samples/lang (irrelevant): %d" % max(irr_sample_sizes))
-        if 'unk' in self.lang2path:
-            logger.info("  # samples (unknown): %d" % UNK_SAMPLE_SIZE)            
-        return lang2samplesize
+
+    def read_line(self, lang):
+        # Check if we have reached EOF for sampled language
+        if self.lang2ix[lang] >= (self.lang2freq[lang]-1):
+            self.lang2file[lang].close()
+            self.lang2file[lang] = open(self.lang2path[lang], "r", encoding=self.encoding)
+            self.lang2ix[lang] = 0
+        # Read next line for sampled language
+        line = next(self.lang2file[lang])
+        self.lang2ix[lang] += 1
+        return line
+
+
+    def sample_language(self):
+        if len(self.lang_list) == 1:
+            return self.lang_list[0]
+        sampled_lang_id = self.sampled_lang_buffer[self.sampled_lang_buffer_ix]
+        sampled_lang = self.lang_list[sampled_lang_id]
+        self.sampled_lang_buffer_ix += 1
+        if self.sampled_lang_buffer_ix >= self.sampled_lang_buffer_size:
+            # Refresh buffer
+            self.sampled_lang_buffer = self._make_sampled_lang_buffer()            
+            self.sampled_lang_buffer_ix = 0
+        return sampled_lang
+    
+    
+    def _make_sampled_lang_buffer(self):
+        nb_langs = len(self.lang_list)
+        b = np.random.choice(np.arange(nb_langs),
+                             size=self.sampled_lang_buffer_size,
+                             replace=True,
+                             p=self.sample_probs)
+        return b
+                 
+    
+    def _compute_sampling_probs(self):
+        if len(self.lang_list) == 1:
+            return [1]
+        if self.split_sampling:
+            # We compute the sampling probabilities of the relevant
+            # and irrelevant languages independently, then halve.
+            rel_langs = sorted(RELEVANT_LANGS)
+            irr_langs = sorted(IRRELEVANT_LANGS)
+            rel_probs = self._compute_sampling_probs_for_subgroup(rel_langs)
+            irr_probs = self._compute_sampling_probs_for_subgroup(irr_langs)
+            rel_probs = rel_probs / 2
+            irr_probs = irr_probs / 2
+            sample_probs = [0 for lang in self.lang_list]            
+            for lang, prob in zip(rel_langs, rel_probs):
+                lang_id = self.lang2id[lang]
+                sample_probs[lang_id] = prob
+            for lang, prob in zip(irr_langs, irr_probs):
+                lang_id = self.lang2id[lang]
+                sample_probs[lang_id] = prob
+            logger.info("  Stats on sampling probabilities:")
+            logger.info("    Min prob (relevant): %f" % (min(rel_probs)))
+            logger.info("    Max prob (relevant): %f" % (max(rel_probs)))
+            logger.info("    Min prob (irrelevant): %f" % (min(irr_probs)))
+            logger.info("    Max prob (irrelevant): %f" % (max(irr_probs)))           
+        else:
+            sample_probs = self._compute_sampling_probs_for_subgroup(self.lang_list)
+            logger.info("  Stats on sampling probabilities:")                        
+            logger.info("    Min prob: %f" % min(probs))
+            logger.info("    Max prob: %f" % max(probs))
+        return sample_probs
+
+
+    def _compute_sampling_probs_for_subgroup(self, lang_list):
+        counts = np.array([self.lang2freq[k] for k in lang_list], dtype=np.float)
+        probs = counts / counts.sum()
+        probs_damp = probs ** self.sampling_alpha
+        probs = probs_damp / probs_damp.sum()
+        return probs
 
     
 class InputExampleForMLM(object):
@@ -264,57 +275,38 @@ class InputFeaturesForMLM(object):
     
 class BertDatasetForMLM(BertDatasetForTraining):
     
-    def __init__(self, train_paths, tokenizer, seq_len, unk_only=False, sampling_distro="uniform", encoding="utf-8", seed=None, verbose=False):
+    def __init__(self, train_paths, tokenizer, seq_len, sampling_alpha=0.0, split_sampling=False, encoding="utf-8", seed=None, verbose=False):
         # Init parent class
-        size = REL_SAMPLE_SIZE + CON_SAMPLE_SIZE + IRR_SAMPLE_SIZE
-        if not unk_only and check_for_unk_train_data(train_paths) is not None:
-            size += UNK_SAMPLE_SIZE
-        super().__init__(train_paths, tokenizer, seq_len, size, unk_only=unk_only, sampling_distro=sampling_distro, encoding=encoding, seed=seed, verbose=verbose)
-        
-        # Sample a training set
-        self.resample() 
+        super().__init__(train_paths, tokenizer, seq_len, sampling_alpha=sampling_alpha, split_sampling=split_sampling, encoding=encoding, seed=seed, verbose=verbose)
         return
-    
-    
-    def resample(self):
-        """ Sample dataset by lazily loading part of the data from disk. """
-        data = []
-        for lang in self.lang2path.keys():
-            # Check how many examples we sample for this lang
-            sample_size = self.lang2samplesize[lang]
-            for _ in range(sample_size):
-                # Check if we have reached EOF
-                if self.lang2ix[lang] >= (self.lang2freq[lang]-1):
-                    self.lang2file[lang].close()
-                    self.lang2file[lang] = open(self.lang2path[lang], "r", encoding=self.encoding)
-                    self.lang2ix[lang] = 0
-                line = next(self.lang2file[lang])
-                self.lang2ix[lang] += 1
-                (text,_) = line_to_data(line, False)
-                assert text is not None and len(text)
-                data.append(text)
-        assert len(data) == self.sampled_dataset_size
 
-        # Shuffle
-        np.random.shuffle(data)
-        self.sampled_dataset = data
-        return None
+
+    def __iter__(self):
+        sampler = self._generate_samples()
+        return sampler
 
     
-    def __getitem__(self, item):
-        t = self.sampled_dataset[item]
-        example_id = self.sample_counter
-        self.sample_counter += 1
-        tokens = self.tokenizer.tokenize(t)
-        example = InputExampleForMLM(guid=example_id, tokens=tokens)
-        features = self._convert_example_to_features(example)
-        tensors = (torch.tensor(features.input_ids),
-                   torch.tensor(features.input_mask),
-                   torch.tensor(features.segment_ids),
-                   torch.tensor(features.lm_label_ids))
-        return tensors
+    def _generate_samples(self):
+        while True:
+            # Sample a language
+            lang = self.sample_language()
+            line = self.read_line(lang)
+            (text,_) = line_to_data(line, False)
+            assert text is not None and len(text)
 
-    
+            # Create input tensors
+            example_id = self.sample_counter
+            self.sample_counter += 1
+            tokens = self.tokenizer.tokenize(text)
+            example = InputExampleForMLM(guid=example_id, tokens=tokens)
+            features = self._convert_example_to_features(example)
+            tensors = (torch.tensor(features.input_ids),
+                       torch.tensor(features.input_mask),
+                       torch.tensor(features.segment_ids),
+                       torch.tensor(features.lm_label_ids))
+            yield tensors
+
+            
     def _convert_example_to_features(self, example):
         """Convert a raw sample (a sentence as tokenized strings) into a
         proper training sample for MLM only, with IDs, LM labels,
@@ -408,125 +400,70 @@ class InputFeaturesForSPCAndMLM(object):
 
 class BertDatasetForSPCAndMLM(BertDatasetForTraining):
     
-    def __init__(self, train_paths, tokenizer, seq_len, sampling_distro="uniform", encoding="utf-8", seed=None, verbose=False):
-        size = REL_SAMPLE_SIZE + CON_SAMPLE_SIZE + IRR_SAMPLE_SIZE
-        
+    def __init__(self, train_paths, tokenizer, seq_len, sampling_alpha=0.0, split_sampling=False, encoding="utf-8", seed=None, verbose=False):
         # Init parent class
-        super().__init__(train_paths, tokenizer, seq_len, size, sampling_distro=sampling_distro, encoding=encoding, seed=seed, verbose=verbose)
+        super().__init__(train_paths, tokenizer, seq_len, sampling_alpha=sampling_alpha, split_sampling=split_sampling, encoding=encoding, seed=seed, verbose=verbose)
 
-        # Compute sampling probabilities for negative candidates
-        counts = np.array([self.lang2samplesize[k] for k in self.lang_list], dtype=float)
-        probs = counts / counts.sum()
-        # Dampen
-        damp = probs ** 0.5
-        probs = damp / damp.sum()
-        self.neg_sampling_probs = probs
+        # Training data should not include UNK, as we cannot do SPC on unlabeled data
+        assert 'unk' not in self.lang_list
 
-        # Make a buffer of negative candidates
-        self.neg_buffer_size = 2*len(self)
-        self.neg_buffer = self._get_neg_buffer()
-        self.neg_buffer_ix = 0
-
-        # Sample a training set
-        self.resample()
-        return
-
-
-    def _get_neg_buffer(self):
-         return np.random.choice(np.arange(0,len(self.lang_list)), self.neg_buffer_size, replace=True, p=self.neg_sampling_probs)
-
-    
-    def _sample_lang_id_for_neg_sampling(self):
-        """ Sample language for negative sampling. Return ID of language. """
-        sampled_id = self.neg_buffer[self.neg_buffer_ix]
-        self.neg_buffer_ix += 1
-        if self.neg_buffer_ix == self.neg_buffer_size:
-            self.neg_buffer = self._get_neg_buffer()
-            self.neg_buffer_ix = 0
-        return sampled_id
-
-    
-    def resample(self):
-        """ Sample dataset by lazily loading part of the data from disk. """
-        lang2texts = {}
-        for lang in self.lang_list:
-            # Check how many examples we sample for this lang
-            sample_size = self.lang2samplesize[lang]
-            texts = []
-            for _ in range(sample_size):
-                # Check if we have reached EOF
-                if self.lang2ix[lang] >= (self.lang2freq[lang]-1):
-                    self.lang2file[lang].close()
-                    self.lang2file[lang] = open(self.lang2path[lang], "r", encoding=self.encoding)
-                    self.lang2ix[lang] = 0
-                line = next(self.lang2file[lang])
-                self.lang2ix[lang] += 1
-                (text,_) = line_to_data(line, False)
-                assert text is not None and len(text)
-                texts.append(text)
-            lang2texts[lang] = texts
-        assert sum(len(x) for x in lang2texts.values()) == self.sampled_dataset_size
+        # We need more than one language to do SPC
+        assert len(self.lang_list) > 1
         
-        # Now pick a positive candidate and a negative candidate for each query
-        queries = []
-        pos_candidates = []
-        neg_candidates = []
-        for lang in self.lang_list:
-            texts = lang2texts[lang]
-            if len(texts) < 1:
-                msg = "We must have 2 samples from each language. "
-                msg += "Increase sample size or use a different sampling_distro."
-                raise RuntimeError(msg)
 
-            # Loop over queries
-            for i in range(len(texts)):
-                queries.append(texts[i])
-                
-                # Pick a positive candidate (same language)
-                other_indices = list(range(0,i)) + list(range(i+1,len(texts)))
-                pos_ix = random.choice(other_indices)
-                pos_candidates.append(texts[pos_ix])
-                
-                # Sample negative candidate from another language. First
-                # we sample the language, according to their relative
-                # frequency in our sample of texts
-                sampled_lang = None
-                while sampled_lang is None:
-                    sampled_id = self._sample_lang_id_for_neg_sampling()
-                    if self.lang_list[sampled_id] != lang:
-                        sampled_lang = self.lang_list[sampled_id]
-                # Now we sample a text at random
-                neg_candidate = random.choice(lang2texts[sampled_lang])
-                neg_candidates.append(neg_candidate)
-        assert len(queries) == len(pos_candidates)
-        assert len(queries) == len(neg_candidates)
-        data = list(zip(queries, pos_candidates, neg_candidates))
+    def __iter__(self):
+        sampler = self._generate_samples()
+        return sampler
+
+    
+    def _generate_samples(self):
+        while True:
+            # Sample a language for which we have at least 2 examples (query and positive example)
+            pos_lang = None
+            while pos_lang is None:
+                sampled_lang = self.sample_language()
+                if self.lang2freq[sampled_lang] > 1:
+                    pos_lang = sampled_lang
+
+            # Read 2 lines: one for the query, the other for the positive example
+            line_query = self.read_line(pos_lang)
+            line_pos = self.read_line(pos_lang)
+            (text_query,_) = line_to_data(line_query, False)
+            (text_pos,_) = line_to_data(line_pos, False)
+            assert text_query is not None and len(text_query)
+            assert text_pos is not None and len(text_pos)
+
+            # Sample a different language for the negative example
+            neg_lang = None
+            while neg_lang is None:
+                sampled_lang = self.sample_language()
+                if sampled_lang != pos_lang:
+                    neg_lang = sampled_lang
+
+            # Read a line
+            line_neg = self.read_line(neg_lang)
+            (text_neg,_) = line_to_data(line_neg, False)
+            assert text_neg is not None and len(text_neg)
+            
+                    
+            # Create input tensors
+            example_id = self.sample_counter
+            self.sample_counter += 1
+            tokens_query = self.tokenizer.tokenize(text_query)
+            tokens_pos = self.tokenizer.tokenize(text_pos)
+            tokens_neg = self.tokenizer.tokenize(text_neg)        
+            example = InputExampleForSPCAndMLM(guid=example_id, tokens_query=tokens_query, tokens_pos=tokens_pos, tokens_neg=tokens_neg)
+            features = self._convert_example_to_features(example)
+            tensors = (torch.tensor(features.input_ids_query),
+                       torch.tensor(features.input_mask_query),
+                       torch.tensor(features.segment_ids_query),
+                       torch.tensor(features.input_ids_cands),
+                       torch.tensor(features.input_mask_cands),
+                       torch.tensor(features.segment_ids_cands),
+                       torch.tensor(features.pos_cand_id),
+                       torch.tensor(features.lm_label_ids_query))
+            yield tensors
         
-        # Shuffle
-        np.random.shuffle(data)
-        self.sampled_dataset = data
-        return None
-
-    
-    def __getitem__(self, item):
-        (q,p,n) = self.sampled_dataset[item]
-        example_id = self.sample_counter
-        self.sample_counter += 1
-        tokens_query = self.tokenizer.tokenize(q)
-        tokens_pos = self.tokenizer.tokenize(p)
-        tokens_neg = self.tokenizer.tokenize(n)        
-        example = InputExampleForSPCAndMLM(guid=example_id, tokens_query=tokens_query, tokens_pos=tokens_pos, tokens_neg=tokens_neg)
-        features = self._convert_example_to_features(example)
-        tensors = (torch.tensor(features.input_ids_query),
-                   torch.tensor(features.input_mask_query),
-                   torch.tensor(features.segment_ids_query),
-                   torch.tensor(features.input_ids_cands),
-                   torch.tensor(features.input_mask_cands),
-                   torch.tensor(features.segment_ids_cands),
-                   torch.tensor(features.pos_cand_id),
-                   torch.tensor(features.lm_label_ids_query))
-        return tensors
-    
 
     def _convert_example_to_features(self, example):
         """Convert a raw sample (a sentence as tokenized strings) into a
@@ -663,56 +600,38 @@ class InputFeaturesForClassification(object):
     
 class BertDatasetForClassification(BertDatasetForTraining):
     
-    def __init__(self, train_paths, tokenizer, seq_len, include_mlm=False, sampling_distro="uniform", encoding="utf-8", seed=None, verbose=False):
+    def __init__(self, train_paths, tokenizer, seq_len, include_mlm=False, sampling_alpha=0.0, split_sampling=False, encoding="utf-8", seed=None, verbose=False):
         # Init parent class
-        size = REL_SAMPLE_SIZE + CON_SAMPLE_SIZE + IRR_SAMPLE_SIZE
-        super().__init__(train_paths, tokenizer, seq_len, size, unk_only=False, sampling_distro=sampling_distro, encoding=encoding, seed=seed, verbose=verbose)
+        super().__init__(train_paths, tokenizer, seq_len, sampling_distro=sampling_distro, encoding=encoding, seed=seed, verbose=verbose)
         self.include_mlm = include_mlm
         
-        # Sample a training set
-        self.resample() 
-        return
-    
-    
-    def resample(self):
-        """ Sample dataset by lazily loading part of the data from disk. """
-        data = []
-        for lang in self.lang2path.keys():
-            # Check how many examples we sample for this lang
-            sample_size = self.lang2samplesize[lang]
-            for _ in range(sample_size):
-                # Check if we have reached EOF
-                if self.lang2ix[lang] >= (self.lang2freq[lang]-1):
-                    self.lang2file[lang].close()
-                    self.lang2file[lang] = open(self.lang2path[lang], "r", encoding=self.encoding)
-                    self.lang2ix[lang] = 0
-                line = next(self.lang2file[lang])
-                self.lang2ix[lang] += 1
-                (text,_) = line_to_data(line, False)
-                assert text is not None and len(text)
-                data.append((text, lang))
-        assert len(data) == self.sampled_dataset_size
 
-        # Shuffle
-        np.random.shuffle(data)
-        self.sampled_dataset = data
-        return None
+    def __iter__(self):
+        sampler = self._generate_samples()
+        return sampler
 
     
-    def __getitem__(self, item):
-        text, lang = self.sampled_dataset[item]
-        example_id = self.sample_counter
-        self.sample_counter += 1
-        tokens = self.tokenizer.tokenize(text)
-        example = InputExampleForClassification(guid=example_id, tokens=tokens, label=lang)
-        features = self._convert_example_to_features(example)
-        tensors = [torch.tensor(features.input_ids),
-                   torch.tensor(features.input_mask),
-                   torch.tensor(features.segment_ids),
-                   torch.tensor(features.label_id),
-                   torch.tensor(features.masked_input_ids),
-                   torch.tensor(features.lm_label_ids)]
-        return tensors
+    def _generate_samples(self):
+        while True:
+            # Sample a language
+            lang = self.sample_language()
+            line = self.read_line(lang)
+            (text,_) = line_to_data(line, False)
+            assert text is not None and len(text)
+
+            # Create input tensors
+            example_id = self.sample_counter
+            self.sample_counter += 1
+            tokens = self.tokenizer.tokenize(text)
+            example = InputExampleForClassification(guid=example_id, tokens=tokens, label=lang)
+            features = self._convert_example_to_features(example)
+            tensors = [torch.tensor(features.input_ids),
+                       torch.tensor(features.input_mask),
+                       torch.tensor(features.segment_ids),
+                       torch.tensor(features.label_id),
+                       torch.tensor(features.masked_input_ids),
+                       torch.tensor(features.lm_label_ids)]
+            yield tensors
 
     
     def _convert_example_to_features(self, example):
@@ -731,7 +650,7 @@ class BertDatasetForClassification(BertDatasetForTraining):
         tokens = tokens[:self.seq_len-2]
 
         # Mask tokens for MLM
-        if self.include_mlm:
+        if self.include_mlm
             masked_tokens, lm_label_ids = mask_random_tokens(tokens, self.tokenizer)
 
         # Add CLS and SEP
@@ -809,6 +728,7 @@ class BertDatasetForTesting(Dataset):
         - seq_len: maximum sequence length (including CLS and SEP)
 
         """
+        super(BertDatasetForTesting).__init__()
         self.path_data = path_data
         self.tokenizer = tokenizer
         self.label2id = label2id
