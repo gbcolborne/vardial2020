@@ -3,7 +3,7 @@
 import os, argparse, random, logging
 import numpy as np
 from iteround import saferound
-from comp_utils import map_ULI_langs_to_paths, stream_sents, RELEVANT_LANGS, IRRELEVANT_URALIC_LANGS
+from comp_utils import stream_sents, ALL_LANGS, RELEVANT_LANGS, IRRELEVANT_URALIC_LANGS
 
 
 def build_example(text, lang):
@@ -25,7 +25,7 @@ def main():
     parser.add_argument("rel_size", type=int, 
                         help="Number of relevant sentences in dev set")
     parser.add_argument("con_size", type=int, 
-                        help="Number of confounding (i.e. irrelevan Uralic) sentences in dev set")
+                        help="Number of confounding (i.e. irrelevant Uralic) sentences in dev set")
     parser.add_argument("irr_size", type=int, 
                         help="Number of irrelevant sentences in dev set")
     parser.add_argument("--balance-rel", action="store_true",
@@ -54,7 +54,7 @@ def main():
     random.seed(91500)
 
     # Get all langs
-    langs = sorted(map_ULI_langs_to_paths(args.input_dir).keys())
+    langs = sorted(ALL_LANGS.keys())
     rel_langs = sorted(RELEVANT_LANGS)
     con_langs = sorted(IRRELEVANT_URALIC_LANGS)
     irr_langs = sorted(set(langs).difference(rel_langs + con_langs))
