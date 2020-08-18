@@ -1,16 +1,68 @@
-""" Make dev set """
+""" Make train/dev/test split. """
 
-import os, argparse, random, logging
+import os, argparse, logging
 import numpy as np
-from iteround import saferound
-from comp_utils import stream_sents, ALL_LANGS, RELEVANT_LANGS, IRRELEVANT_URALIC_LANGS
+from comp_utils import stream_sents, ALL_LANGS, RELEVANT_LANGS, IRRELEVANT_LANGS, IRRELEVANT_URALIC_LANGS
 
 
-def build_example(text, lang):
-    return "%s\t%s" % (text, lang)
+def log_stats(numbers, logger):
+    logger.info("Count: {}".format(len(numbers)))
+    logger.info("Min: {}".format(min(numbers)))
+    logger.info("Mean: {}".format(np.mean(numbers)))
+    logger.info("Max: {}".format(max(numbers)))
+    logger.info("Sum: {}".format(sum(numbers)))    
+    logger.info("Median: {}".format(np.median(numbers)))    
+    logger.info("# zeros: {}".format(sum(1 for x in numbers if x==0)))
+
+def compute_sampling_probs(data_dir, alpha=1.0, rel_weight=1.0, logger=None):
+    assert alpha >= 0 and alpha <= 1
+    lang2prob = {}
+    # We compute the sampling probabilities of the relevant and
+    # irrelevant languages independently.
+    rel_langs = sorted(RELEVANT_LANGS)
+    irr_langs = sorted(IRRELEVANT_LANGS)
+    if logger:
+        logger.info("Computing sampling probabilities for relevant languages...")
+    rel_probs = compute_sampling_probs_for_subgroup(rel_langs, data_dir, alpha=alpha, logger=logger)
+    if logger:
+        logger.info("Computing sampling probabilities for irrelevant languages...")
+    irr_probs = compute_sampling_probs_for_subgroup(irr_langs, data_dir, alpha=alpha, logger=logger)
+    # Weight the distribution of relevant languages, then renormalize
+    rel_probs = rel_probs * rel_weight
+    sum_of_both = rel_probs.sum() + irr_probs.sum()
+    rel_probs = rel_probs / sum_of_both
+    irr_probs = irr_probs / sum_of_both
+    for lang, prob in zip(rel_langs, rel_probs):
+        lang2prob[lang] = prob
+    for lang, prob in zip(irr_langs, irr_probs):
+        lang2prob[lang] = prob
+    if logger:
+        title = "Stats on sampling probabilities for relevant languages"            
+        log_title_with_border(title, logger)
+        log_stats(rel_probs, logger)
+        title = "Stats on sampling probabilities for irrelevant languages"            
+        log_title_with_border(title, logger)
+        log_stats(irr_probs, logger)            
+    return lang2prob
 
 
-def log_title_with_border(logger, title):
+def compute_sampling_probs_for_subgroup(lang_list, data_dir, alpha=1.0, logger=None):
+    assert alpha >= 0 and alpha <= 1
+    if len(lang_list) == 1:
+        return [1]
+    lang2freq = {}
+    for lang in lang_list:
+        if logger: 
+            logger.info("  %s" % lang)
+        lang2freq[lang] = sum(1 for (sent, text_id, url) in stream_sents(lang, data_dir, input_format="text-only"))
+    counts = np.array([lang2freq[k] for k in lang_list], dtype=np.float)
+    probs = counts / counts.sum()
+    probs_damp = probs ** alpha
+    probs = probs_damp / probs_damp.sum()
+    return probs
+
+
+def log_title_with_border(title, logger):
     title = "--- %s ---" % title
     line = "-" * len(title)
     logger.info(line)
@@ -20,31 +72,30 @@ def log_title_with_border(logger, title):
     
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--add_test_set", action="store_true",
-                        help="Make a test set using the same distribution and sampling method as the dev set")
-    parser.add_argument("--split_train_by_lang", action="store_true",
-                        help="Instead of a single file called 'train.tsv', write one file per lang, called '<lang>.train'.")
-    parser.add_argument("rel_size", type=int, 
-                        help="Number of relevant sentences in dev set")
-    parser.add_argument("con_size", type=int, 
-                        help="Number of confounding (i.e. irrelevant Uralic) sentences in dev set")
-    parser.add_argument("irr_size", type=int, 
-                        help="Number of irrelevant sentences in dev set")
-    parser.add_argument("--balance-rel", action="store_true",
-                        help="Balance the 29 relevant languages.")
-    parser.add_argument("--balance-con", action="store_true",
-                        help="Balance the 3 confounding languages (i.e. irrelevant Uralic)")
-    parser.add_argument("--balance-irr", action="store_true",
-                        help="Balance the 146 irrelevant languages (excluding Uralic confounders)")
-    parser.add_argument("input_dir", help="Path of directory containing training data")
+    parser.add_argument("--sampling_alpha", type=float, default=1.0,
+                        help="Frequency dampening factor used for computing language sampling probabilities")
+    parser.add_argument("--weight_relevant", type=float, default=1.0,
+                        help=("Relative sampling frequency of relevant languages wrt irrelevant languages."
+                              " Default is 1, which produces a balanced mix of relevant and irrelevant."))
+    parser.add_argument("dev_size", type=int, 
+                        help="Number of examples in dev set (must be greater than 0)")
+    parser.add_argument("test_size", type=int,
+                        help="Number of examples in test set (can be 0)")
+    parser.add_argument("input_dir", help=("Path of directory containing training data (n files named <lang>.train,"
+                                           " containing unlabeled text only (no labels, URLS or text IDs)"))
     parser.add_argument("output_dir")
     args = parser.parse_args()
     
     # Check args
-    if os.path.exists(args.output_dir):
-        assert os.path.isdir(args.output_dir) and len(os.listdir(args.output_dir)) == 0
-    else:
-        os.makedirs(args.output_dir)
+    assert args.dev_size > 0
+    assert args.test_size >= 0
+    assert args.sampling_alpha >= 0 and args.sampling_alpha <= 1
+    assert not os.path.exists(args.output_dir)
+    os.makedirs(args.output_dir)
+    outdir_train = os.path.join(args.output_dir, "Training")
+    outdir_test = os.path.join(args.output_dir, "Test")        
+    os.makedirs(outdir_train)
+    os.makedirs(outdir_test)
 
     # We expect that the input dir contains n files called lang.train, which contain unlabeled text (without labels, URLS or text IDs)
     for n in os.listdir(args.input_dir):
@@ -60,180 +111,114 @@ def main():
                         level = logging.DEBUG)
 
     # Seed RNG
-    random.seed(91500)
     np.random.seed(91500)
     
-    # Get all langs
-    langs = sorted(ALL_LANGS)
-    rel_langs = sorted(RELEVANT_LANGS)
-    con_langs = sorted(IRRELEVANT_URALIC_LANGS)
-    irr_langs = sorted(set(langs).difference(rel_langs + con_langs))
+    # Get language sampling probabilities
+    lang2prob = compute_sampling_probs(args.input_dir,
+                                       alpha=args.sampling_alpha,
+                                       rel_weight=args.weight_relevant,
+                                       logger=logger)
 
-    # Map langs to IDs
-    rel_lang2id = dict((l,i) for (i,l) in enumerate(rel_langs))
-    con_lang2id = dict((l,i) for (i,l) in enumerate(con_langs))
-    irr_lang2id = dict((l,i) for (i,l) in enumerate(irr_langs))
-
-    # Compute expected distribution of dev set based on training data
-    logger.info("Computing expected distribution of dev set based on training data...")
-    lang2freq = {}
-    for lang in langs:
-        logger.info("  " + lang)
-        lang2freq[lang] = sum(1 for (sent, text_id, url) in stream_sents(lang, args.input_dir, input_format="text-only"))
-    if args.balance_rel:
-        rel_probs = np.ones(len(rel_langs), dtype=float) / len(rel_langs)
-    else:
-        rel_counts = np.array([lang2freq[k] for k in rel_langs], dtype=np.float)
-        rel_probs = rel_counts / rel_counts.sum()
-    if args.balance_con:
-        con_probs = np.ones(len(con_langs), dtype=float) / len(con_langs)
-    else:
-        con_counts = np.array([lang2freq[k] for k in con_langs], dtype=np.float)
-        con_probs = con_counts / con_counts.sum()
-    if args.balance_irr:
-        irr_probs = np.ones(len(irr_langs), dtype=float) / len(irr_langs)
-    else:
-        irr_counts = np.array([lang2freq[k] for k in irr_langs], dtype=np.float)
-        irr_probs = irr_counts / irr_counts.sum()
-
-    # Compute expected count of dev sentences. Use a sum-safe rounding function.
-    rel_dev_counts = [int(x) for x in saferound(rel_probs * args.rel_size, 0, "largest")]
-    con_dev_counts = [int(x) for x in saferound(con_probs * args.con_size, 0, "largest")]
-    irr_dev_counts = [int(x) for x in saferound(irr_probs * args.irr_size, 0, "largest")]
-
-    # Make train/dev split
-    if args.split_train_by_lang:
-        lang_to_path_train = {}
-        lang_to_f_train = {}        
-        for lang in langs:
-            lang_to_path_train[lang] = os.path.join(args.output_dir, "%s.train" % lang)
-            lang_to_f_train[lang] = open(lang_to_path_train[lang], 'w')
-    else:
-        path_train = os.path.join(args.output_dir, "train.tsv")
-        f_train = open(path_train, 'w')
-    path_dev = os.path.join(args.output_dir, "valid.tsv")
-    f_dev = open(path_dev, 'w')
-    if args.add_test_set:
-        path_test = os.path.join(args.output_dir, "test.tsv")
-        f_test = open(path_test, 'w')
-        logger.info("Writing train-dev-test split --> %s..." % args.output_dir)
-        title = "lang (train/dev/test)"
-    else:
-        logger.info("Writing train-dev split --> %s..." % args.output_dir)
-        title = "lang (train/dev)"
-    log_title_with_border(logger, title)
-    for lang in langs:
-        if args.split_train_by_lang:
-            f_train = lang_to_f_train[lang]
-        nb_sents = int(lang2freq[lang])
-        all_indices = list(range(nb_sents))
-
-        # Is this a relevant, confounding or irrelevant lang?
-        if lang in rel_lang2id:
-            nb_dev = rel_dev_counts[rel_lang2id[lang]]
-        elif lang in con_lang2id:
-            nb_dev = con_dev_counts[con_lang2id[lang]]
-        elif lang in irr_lang2id:
-            nb_dev = irr_dev_counts[irr_lang2id[lang]]
-        if args.add_test_set:
-            nb_test = nb_dev
-            nb_train = nb_sents - nb_dev - nb_test
-            logger.info("  %s (%d/%d/%d)" % (lang, nb_train, nb_dev, nb_test))
-        else:
-            nb_train = nb_sents - nb_dev
-            logger.info("  %s (%d/%d)" % (lang, nb_train, nb_dev))
-
-        if nb_dev == 0:
-            if args.add_test_set:
-                assert nb_test == 0
-            # No dev or test sentences to sample
-            for i, (text,text_id,url) in enumerate(stream_sents(lang, args.input_dir, input_format="text-only")):
-                f_train.write(build_example(text, lang) + "\n")
-            continue
+    # Sample languages and count
+    all_langs = sorted(ALL_LANGS)
+    sampling_probs = [lang2prob[k] for k in all_langs]
+    dev_sample = np.random.choice(np.arange(len(all_langs)),
+                              size=args.dev_size,
+                              replace=True,
+                              p=sampling_probs)
+    dev_counts = [0 for k in all_langs]
+    for lang_id in dev_sample:
+        dev_counts[lang_id] += 1
+    if args.test_size > 0:
+        test_sample = np.random.choice(np.arange(len(all_langs)),
+                                       size=args.test_size,
+                                       replace=True,
+                                       p=sampling_probs)
+        test_counts = [0 for k in all_langs]            
+        for lang_id in test_sample:
+            test_counts[lang_id] += 1
         
-        # Sample dev and test sentence indices
-        all_indices = np.arange(nb_sents, dtype=int)
-        if args.add_test_set:
-            devtest_indices = np.random.choice(all_indices, size=(nb_dev+nb_test), replace=False).tolist()
-            dev_indices = devtest_indices[:nb_dev]
-            test_indices = devtest_indices[nb_dev:]
-            sorted_dev_indices = sorted(dev_indices)
-            sorted_test_indices = sorted(test_indices)
-            next_dev_ix = sorted_dev_indices.pop(0)
-            next_test_ix = sorted_test_indices.pop(0)
-        else:
-            dev_indices = np.random.choice(all_indices, size=nb_dev, replace=False).tolist()
-            sorted_dev_indices = sorted(dev_indices)
-            next_dev_ix = sorted_dev_indices.pop(0)
-            next_test_ix = None
-            
-        # Write split
-        nb_dev_written = 0
-        nb_test_written = 0
-        only_train_left = False
-        for i, (text,text_id,url) in enumerate(stream_sents(lang, args.input_dir, input_format="text-only")):
-            if only_train_left:
-                f_train.write(build_example(text, lang) + "\n")
-                continue
-            is_dev = next_dev_ix is not None and next_dev_ix == i
-            if is_dev:
-                f_dev.write(build_example(text, lang) + "\n")
-                nb_dev_written += 1
-                if len(sorted_dev_indices) == 0:
-                    next_dev_ix = None
-                    if next_test_ix == None:
-                        only_train_left = True
-                else:
-                    next_dev_ix = sorted_dev_indices.pop(0)
-                continue
-            is_test = next_test_ix is not None and next_test_ix == i
-            if is_test:
-                f_test.write(build_example(text, lang) + "\n")
-                nb_test_written += 1
-                if len(sorted_test_indices) == 0:
-                    next_test_ix = None
-                    if next_dev_ix == None:
-                        only_train_left = True
-                else:
-                    next_test_ix = sorted_test_indices.pop(0)
-                continue
-            # If we have gotten this far, it is neither a dev sentence
-            # nor a test sentence
-            f_train.write(build_example(text, lang) + "\n")            
-        if nb_dev_written != nb_dev:
-            raise ValueError("Expected {} but got {}.".format(nb_dev, nb_dev_written))
-        if args.add_test_set and nb_test_written != nb_test:
-            raise ValueError("Expected {} but got {}.".format(nb_test, nb_test_written))
-    if args.split_train_by_lang:
-        for lang in langs:
-            lang_to_f_train[lang].close()
-    else:
-        f_train.close()
-    f_dev.close()
-    if args.add_test_set:
-        f_test.close()
-
-
-    def shuffle_and_overwrite(path):
-        with open(path, 'r') as f:
-            lines = [line.rstrip() for line in f]
-        np.random.shuffle(lines)
-        with open(path, 'w') as f:
-            for line in lines:
-                f.write(line + "\n")
-        return
+    # Print stats on distributions of the dev and test sets. Show min,
+    # max, mean and median. Then do the same for RELEVANT, CONFOUNDING
+    # AND IRRELEVANT.
+    title = "Stats on # dev samples (all languages)"
+    log_title_with_border(title, logger)
+    log_stats(dev_counts, logger)
+    title = "Stats on # dev samples (relevant languages)"
+    log_title_with_border(title, logger)
+    rel_counts = [dev_counts[i] for i in range(len(dev_counts)) if all_langs[i] in RELEVANT_LANGS]
+    log_stats(rel_counts, logger)
+    title = "Stats on # dev samples (irrelevant languages)"
+    log_title_with_border(title, logger)
+    irr_counts = [dev_counts[i] for i in range(len(dev_counts)) if all_langs[i] in IRRELEVANT_LANGS]    
+    log_stats(irr_counts, logger)
+    title = "Stats on # dev samples (irrelevant Uralic languages)"
+    log_title_with_border(title, logger)
+    con_counts = [dev_counts[i] for i in range(len(dev_counts)) if all_langs[i] in IRRELEVANT_URALIC_LANGS]        
+    log_stats(con_counts, logger)
+    if args.test_size > 0:
+        title = "Stats on # test samples (all languages)"
+        log_title_with_border(title, logger)
+        log_stats(test_counts, logger)
+        title = "Stats on # test samples (relevant languages)"
+        log_title_with_border(title, logger)
+        rel_counts = [test_counts[i] for i in range(len(test_counts)) if all_langs[i] in RELEVANT_LANGS]
+        log_stats(rel_counts, logger)
+        title = "Stats on # test samples (irrelevant languages)"
+        log_title_with_border(title, logger)
+        irr_counts = [test_counts[i] for i in range(len(test_counts)) if all_langs[i] in IRRELEVANT_LANGS]    
+        log_stats(irr_counts, logger)
+        title = "Stats on # test samples (irrelevant Uralic languages)"
+        log_title_with_border(title, logger)
+        con_counts = [test_counts[i] for i in range(len(test_counts)) if all_langs[i] in IRRELEVANT_URALIC_LANGS]        
+        log_stats(con_counts, logger)
+    
+    
+    # Write training data in separate, unlabeled text files. Store dev
+    # and test examples (to shuffle later, to avoid writing them in
+    # order of language)
+    dev_set = []
+    test_set = []
+    logger.info("Writing training data in %s..." % (outdir_train))    
+    for lang_id, lang in enumerate(all_langs):
+        logger.info("  %s" % lang)
+        # Get number of examples
+        nb_examples = sum(1 for (sent, text_id, url) in stream_sents(lang, args.input_dir, input_format="text-only"))
         
-    # Shuffle train, dev and test sets, overwrite
-    if not args.split_train_by_lang:
-        shuffle_and_overwrite(path_train)
-    else:
-        for lang in langs:
-            shuffle_and_overwrite(lang_to_path_train[lang])
-    shuffle_and_overwrite(path_dev)
-    if args.add_test_set:
-        shuffle_and_overwrite(path_test)
-    return
+        # Sample dev and test indices
+        indices = np.arange(nb_examples)
+        np.random.shuffle(indices)
+        nb_dev = dev_counts[lang_id]
+        nb_test = test_counts[lang_id]
+        dev_indices = set(indices[:nb_dev])
+        test_indices = set(indices[nb_dev:nb_dev+nb_test])
+        
+        # Stream sents, write training examples, store others
+        outpath = os.path.join(outdir_train, "%s.train" % (lang))
+        with open(outpath, 'w') as outfile:
+            for ix, (sent, text_id, url) in enumerate(stream_sents(lang,
+                                                                   args.input_dir,
+                                                                   input_format="text-only")):
+                if ix in dev_indices:
+                    dev_set.append((sent, lang))
+                elif ix in test_indices:
+                    test_set.append((sent, lang))
+                else:
+                    outfile.write(sent + "\n")
 
-
+    # Shuffle and write dev and test sets
+    logger.info("Writing test data in %s..." % (outdir_test))
+    np.random.shuffle(dev_set)
+    outpath_dev = os.path.join(outdir_test, "dev.tsv")
+    with open(outpath_dev, 'w') as outfile:
+        for (text, lang) in dev_set:
+            outfile.write("%s\t%s\n" % (text, lang))
+    if len(test_set):
+        np.random.shuffle(test_set)
+        outpath_test = os.path.join(outdir_test, "test.txt")
+        with open(outpath_test, 'w') as outfile:
+            for (text, lang) in test_set:
+                outfile.write("%s\n" % text)
+        
 if __name__ == "__main__":
     main()
