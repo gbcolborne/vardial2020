@@ -13,7 +13,7 @@ from torch.nn import CrossEntropyLoss
 from transformers import BertForMaskedLM, BertConfig
 from transformers import AdamW
 from transformers.optimization import get_linear_schedule_with_warmup
-from tqdm import tqdm, trange
+from tqdm import trange
 from CharTokenizer import CharTokenizer
 from BertDataset import BertDatasetForMLM, BertDatasetForSPCAndMLM, NO_MASK_LABEL
 from Pooler import Pooler
@@ -62,23 +62,21 @@ def train(model, pooler, tokenizer, optimizer, scheduler, dataset, args, checkpo
     header += "\tGradNorm\tWeightNorm"
     with open(args.train_log_path, "w") as f:
         f.write(header + "\n")
+
+    # Make dataloader(s). Note: since BertDatasetForTraining and its
+    # subclasses are IterableDatasets (i.e. streams), the loader is an
+    # iterable (with no end and no __len__) that we call with iter().
+    dataloader = get_dataloader(dataset, args.train_batch_size, args.local_rank)
+    train_batch_sampler = iter(dataloader) 
     
+    if extra_mlm_dataset is not None:
+        mlm_dataloader = get_dataloader(extra_mlm_dataset, args.train_batch_size, args.local_rank)
+        mlm_batch_enum = enumerate(iter(mlm_dataloader))
+
     # Start training
     logger.info("***** Running training *****")
     model.train()
     for epoch in trange(int(args.num_epochs), desc="Epoch"):
-        # Get fresh training samples
-        if epoch > 0:
-              dataset.resample()
-              if extra_mlm_dataset is not None:
-                  extra_mlm_dataset.resample()
-                  
-        # Make dataloader(s)
-        dataloader = get_dataloader(dataset, args.train_batch_size, args.local_rank)
-        if extra_mlm_dataset is not None:
-            mlm_dataloader = get_dataloader(extra_mlm_dataset, args.train_batch_size, args.local_rank)
-            assert len(mlm_dataloader) == len(dataloader)           
-            mlm_batch_enum = enumerate(mlm_dataloader)
         
         # Some stats for this epoch
         real_batch_sizes = []
@@ -91,9 +89,10 @@ def train(model, pooler, tokenizer, optimizer, scheduler, dataset, args, checkpo
         grad_norms = []
         
         # Run training for one epoch
-        for step, batch in enumerate(tqdm(dataloader, desc="Iteration")):
-            # Unpack batch
+        for step in trange(int(args.num_train_steps_per_epoch), desc="Iteration"):
+            batch = next(train_batch_sampler)
             batch = tuple(t.to(args.device) for t in batch)
+            # Unpack
             if args.mlm_only:
                 input_ids_query = batch[0]
                 input_mask_query = batch[1]
@@ -268,7 +267,10 @@ def main():
     # Required if not resuming
     parser.add_argument("--dir_train_data",
                         type=str,
-                        help="Path of a directory containing training files (names must match <lang>.train) and vocab.txt")
+                        help="Path of a directory containing training files (names must all match <lang>.train)")
+    parser.add_argument("--path_vocab",
+                        type=str,
+                        help="Path of a 2-column TSV file containing the vocab of chars and their frequency.")
     parser.add_argument("--output_dir",
                         type=str,
                         help="The output directory where the model checkpoints will be written.")
@@ -282,10 +284,14 @@ def main():
                         action="store_true",
                         help=("Use average pooling of all last hidden states, rather than just the last hidden state of CLS, to do SPC. "
                               "Note that in either case, the pooled vector passes through a square linear layer and a tanh before the classification layer."))
-    parser.add_argument("--sampling_distro",
-                        choices=["uniform", "relfreq", "dampfreq"],
-                        default="relfreq",
-                        help="Distribution used for sampling training data within each group (relevant, confound, and irrelevant)")
+    parser.add_argument("--sampling_alpha",
+                        type=float,
+                        default=1.0,
+                        help="Dampening factor for relative frequencies used to compute language sampling probabilities")
+    parser.add_argument("--weight_relevant",
+                        type=float,
+                        default=1.0,
+                        help="Relative sampling frequency of relevant languages wrt irrelevant languages")
     parser.add_argument("--train_batch_size",
                         default=32,
                         type=int,
@@ -312,6 +318,10 @@ def main():
                         default=1000000,
                         type=int,
                         help="Maximum number of training steps to perform. Note: # optimization steps = # train steps / # accumulation steps.")
+    parser.add_argument("--num_train_steps_per_epoch",
+                        default=1000,
+                        type=int,
+                        help="Number of training steps that equals one epoch. Note: # optimization steps = # train steps / # accumulation steps.")
     parser.add_argument("--num_warmup_steps",
                         default=10000,
                         type=int,
@@ -337,6 +347,7 @@ def main():
     # These args are required if we are not resuming from checkpoint
     if not args.resume:
         assert args.dir_train_data is not None
+        assert args.path_vocab is not None
         assert args.output_dir is not None
         
     # Check whether we are starting from scratch, resuming from a checkpoint, or retraining a pretrained model
@@ -378,9 +389,9 @@ def main():
         config_path = os.path.join(args.bert_model_or_config_file, "config.json")
         config = BertConfig.from_json_file(config_path)        
 
-
-        
     # Check args
+    assert args.sampling_alpha >= 0 and args.sampling_alpha <= 1
+    assert args.weight_relevant > 0
     if args.grad_accum_steps < 1:
         raise ValueError("Invalid grad_accum_steps parameter: {}, should be >= 1".format(
                             args.grad_accum_steps))
@@ -400,9 +411,9 @@ def main():
             tokenizer = pickle.load(f)
     elif from_scratch:
         logger.info("Making tokenizer...")
-        path_vocab = os.path.join(args.dir_train_data, "vocab.txt")
-        assert os.path.exists(path_vocab)
-        tokenizer = CharTokenizer(path_vocab)
+
+        assert os.path.exists(args.path_vocab)
+        tokenizer = CharTokenizer(args.path_vocab)
         if args.min_freq > 1:
             tokenizer.trim_vocab(args.min_freq)
         # Adapt vocab size in config
@@ -490,11 +501,12 @@ def main():
         train_dataset_spc = None
         train_dataset_mlm = BertDatasetForMLM(train_paths,
                                               tokenizer,
-                                              unk_only=False,
                                               seq_len=max_seq_length,
-                                              sampling_distro=args.sampling_distro,
+                                              sampling_alpha=args.sampling_alpha,
+                                              weight_relevant=args.weight_relevant,
                                               encoding="utf-8",
                                               seed=args.seed)
+
     else:
         # We want do to SLC and MLM. If unk data is present, we remove
         # it from the paths provided to BertLabeledDataset.
@@ -503,7 +515,8 @@ def main():
         train_dataset_spc = BertDatasetForSPCAndMLM(train_paths,
                                                     tokenizer,
                                                     seq_len=max_seq_length,
-                                                    sampling_distro=args.sampling_distro,
+                                                    sampling_alpha=args.sampling_alpha,
+                                                    weight_relevant=args.weight_relevant,
                                                     encoding="utf-8",
                                                     seed=args.seed)
         if path_unk is None:
@@ -514,9 +527,9 @@ def main():
             # is used for MLM only.
             train_dataset_mlm = BertDatasetForMLM([path_unk],
                                                   tokenizer,
-                                                  unk_only=True,
                                                   seq_len=max_seq_length,
-                                                  sampling_distro=args.sampling_distro,
+                                                  sampling_alpha=args.sampling_alpha,
+                                                  weight_relevant=args.weight_relevant,
                                                   encoding="utf-8",
                                                   seed=args.seed)
             assert len(train_dataset_spc) == len(train_dataset_mlm)
@@ -530,7 +543,7 @@ def main():
         checkpoint_data["max_opt_steps"] = args.max_train_steps // args.grad_accum_steps
 
     # Compute number of optimization steps per epoch
-    num_opt_steps_per_epoch = int(dataset_length / args.train_batch_size / args.grad_accum_steps)
+    num_opt_steps_per_epoch = args.num_train_steps_per_epoch // args.grad_accum_steps
 
     # Compute number of epochs necessary to reach the maximum number of optimization steps
     opt_steps_left = checkpoint_data["max_opt_steps"] - checkpoint_data["global_step"]
@@ -543,8 +556,9 @@ def main():
     logger.info("Max optimization steps: %d" % checkpoint_data["max_opt_steps"])
     if args.resume:
         logger.info("Nb optimization steps done so far: %d" % checkpoint_data["global_step"])
-    logger.info("Dataset size: %d" % (dataset_length))
+    logger.info("Total dataset size: %d examples" % (dataset_length))
     logger.info("Batch size: %d" % args.train_batch_size)
+    logger.info("# training steps/epoch: %d" % (args.num_train_steps_per_epoch))    
     logger.info("# optimization steps/epoch: %d" % (num_opt_steps_per_epoch))
     logger.info("# epochs to do: %d" % (args.num_epochs))
         
