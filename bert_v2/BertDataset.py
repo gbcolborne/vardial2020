@@ -94,14 +94,14 @@ class BertDatasetForTraining(IterableDataset):
 
     """
 
-    def __init__(self, train_paths, tokenizer, seq_len, sampling_alpha=0.0, split_sampling=False, encoding="utf-8", seed=None, verbose=False):
+    def __init__(self, train_paths, tokenizer, seq_len, sampling_alpha=0.0, weight_relevant=1.0, encoding="utf-8", seed=None, verbose=False):
         super(BertDatasetForTraining).__init__()
         assert sampling_alpha >= 0.0 and sampling_alpha <= 1.0
         self.tokenizer = tokenizer
         self.vocab = tokenizer.vocab
         self.seq_len = seq_len # Includes CLS and SEP tokens
         self.sampling_alpha = sampling_alpha
-        self.split_sampling = split_sampling
+        self.weight_relevant = weight_relevant   # Sampling weight of relevant examples wrt irrelevant examples
         self.encoding = encoding
         self.verbose = verbose
         self.sample_counter = 0  # total number of examples sampled by calling the iterator returned by __iter__ 
@@ -211,32 +211,35 @@ class BertDatasetForTraining(IterableDataset):
     def _compute_sampling_probs(self):
         if len(self.lang_list) == 1:
             return [1]
-        if self.split_sampling:
-            # We compute the sampling probabilities of the relevant
-            # and irrelevant languages independently, then halve.
-            rel_langs = sorted(RELEVANT_LANGS)
-            irr_langs = sorted(IRRELEVANT_LANGS)
-            rel_probs = self._compute_sampling_probs_for_subgroup(rel_langs)
-            irr_probs = self._compute_sampling_probs_for_subgroup(irr_langs)
-            rel_probs = rel_probs / 2
-            irr_probs = irr_probs / 2
-            sample_probs = [0 for lang in self.lang_list]            
-            for lang, prob in zip(rel_langs, rel_probs):
-                lang_id = self.lang2id[lang]
-                sample_probs[lang_id] = prob
-            for lang, prob in zip(irr_langs, irr_probs):
-                lang_id = self.lang2id[lang]
-                sample_probs[lang_id] = prob
-            logger.info("  Stats on sampling probabilities:")
-            logger.info("    Min prob (relevant): %f" % (min(rel_probs)))
-            logger.info("    Max prob (relevant): %f" % (max(rel_probs)))
-            logger.info("    Min prob (irrelevant): %f" % (min(irr_probs)))
-            logger.info("    Max prob (irrelevant): %f" % (max(irr_probs)))           
-        else:
-            sample_probs = self._compute_sampling_probs_for_subgroup(self.lang_list)
-            logger.info("  Stats on sampling probabilities:")                        
-            logger.info("    Min prob: %f" % min(probs))
-            logger.info("    Max prob: %f" % max(probs))
+        # We compute the sampling probabilities of the relevant and
+        # irrelevant languages independently.
+        rel_langs = sorted(RELEVANT_LANGS)
+        irr_langs = sorted(IRRELEVANT_LANGS)
+        logger.info("Computing sampling probabilities for relevant languages...")
+        rel_probs = compute_sampling_probs_for_subgroup(rel_langs, data_dir, alpha=alpha, logger=logger)
+        logger.info("Computing sampling probabilities for irrelevant languages...")
+        irr_probs = compute_sampling_probs_for_subgroup(irr_langs, data_dir, alpha=alpha, logger=logger)
+        # Weight the distribution of relevant languages, then renormalize
+        rel_probs = rel_probs * self.weight_relevant
+        sum_of_both = rel_probs.sum() + irr_probs.sum()
+        rel_probs = rel_probs / sum_of_both
+        irr_probs = irr_probs / sum_of_both
+        sample_probs = [0 for lang in self.lang_list]            
+        for lang, prob in zip(rel_langs, rel_probs):
+            lang_id = self.lang2id[lang]
+            sample_probs[lang_id] = prob
+        for lang, prob in zip(irr_langs, irr_probs):
+            lang_id = self.lang2id[lang]
+            sample_probs[lang_id] = prob
+        logger.info("  Stats on sampling probabilities:")
+        logger.info("    Min prob (relevant): %f" % (min(rel_probs)))
+        logger.info("    Mean prob (relevant): %f" % (np.mean(rel_probs)))        
+        logger.info("    Max prob (relevant): %f" % (max(rel_probs)))
+        logger.info("    Cumulative prob (relevant): %f" % (sum(rel_probs)))        
+        logger.info("    Min prob (irrelevant): %f" % (min(irr_probs)))
+        logger.info("    Mean prob (irrelevant): %f" % (np.mean(irr_probs)))        
+        logger.info("    Max prob (irrelevant): %f" % (max(irr_probs)))
+        logger.info("    Cumulative prob (irrelevant): %f" % (sum(irr_probs)))        
         return sample_probs
 
 
@@ -275,9 +278,9 @@ class InputFeaturesForMLM(object):
     
 class BertDatasetForMLM(BertDatasetForTraining):
     
-    def __init__(self, train_paths, tokenizer, seq_len, sampling_alpha=0.0, split_sampling=False, encoding="utf-8", seed=None, verbose=False):
+    def __init__(self, train_paths, tokenizer, seq_len, sampling_alpha=0.0, weight_relevant=1.0, encoding="utf-8", seed=None, verbose=False):
         # Init parent class
-        super().__init__(train_paths, tokenizer, seq_len, sampling_alpha=sampling_alpha, split_sampling=split_sampling, encoding=encoding, seed=seed, verbose=verbose)
+        super().__init__(train_paths, tokenizer, seq_len, sampling_alpha=sampling_alpha, weight_relevant=weight_relevant, encoding=encoding, seed=seed, verbose=verbose)
         return
 
 
@@ -400,9 +403,9 @@ class InputFeaturesForSPCAndMLM(object):
 
 class BertDatasetForSPCAndMLM(BertDatasetForTraining):
     
-    def __init__(self, train_paths, tokenizer, seq_len, sampling_alpha=0.0, split_sampling=False, encoding="utf-8", seed=None, verbose=False):
+    def __init__(self, train_paths, tokenizer, seq_len, sampling_alpha=0.0, weight_relevant=1.0, encoding="utf-8", seed=None, verbose=False):
         # Init parent class
-        super().__init__(train_paths, tokenizer, seq_len, sampling_alpha=sampling_alpha, split_sampling=split_sampling, encoding=encoding, seed=seed, verbose=verbose)
+        super().__init__(train_paths, tokenizer, seq_len, sampling_alpha=sampling_alpha, weight_relevant=weight_relevant, encoding=encoding, seed=seed, verbose=verbose)
 
         # Training data should not include UNK, as we cannot do SPC on unlabeled data
         assert 'unk' not in self.lang_list
@@ -600,9 +603,9 @@ class InputFeaturesForClassification(object):
     
 class BertDatasetForClassification(BertDatasetForTraining):
     
-    def __init__(self, train_paths, tokenizer, seq_len, include_mlm=False, sampling_alpha=0.0, split_sampling=False, encoding="utf-8", seed=None, verbose=False):
+    def __init__(self, train_paths, tokenizer, seq_len, include_mlm=False, sampling_alpha=0.0, weight_relevant=1.0, encoding="utf-8", seed=None, verbose=False):
         # Init parent class
-        super().__init__(train_paths, tokenizer, seq_len, sampling_distro=sampling_distro, encoding=encoding, seed=seed, verbose=verbose)
+        super().__init__(train_paths, tokenizer, seq_len, sampling_alpha=sampling_alpha, weight_relevant=weight_relevant, encoding=encoding, seed=seed, verbose=verbose)
         self.include_mlm = include_mlm
         
 
