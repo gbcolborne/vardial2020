@@ -1,6 +1,6 @@
-""" Compute vocab of a labeled training data file """
+""" Compute vocab of training data """
 
-import argparse
+import argparse, os
 from io import open
 
 def line_to_data(line):
@@ -21,19 +21,22 @@ def line_to_data(line):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("train_file", help="path of training file (one text per line, with optional label, separated by tab)")
-    parser.add_argument("path_out", help="Paht of output file")
+    parser.add_argument("dir_train", help="path of directory containing training files (one text per line, with optional label, separated by tab)")
+    parser.add_argument("path_out", help="Path of output file")
     args = parser.parse_args()
-    with open(args.train_file, encoding="utf-8") as f:
-        char2freq = {}
-        for i, line in enumerate(f):
-            text, label = line_to_data(line)
-            for char in text:
-                if char not in char2freq:
-                    char2freq[char] = 0
-                char2freq[char] += 1
-            if (i+1) % 100000 == 0:
-                print("Nb lines processed: %d" % (i+1))
+    char2freq = {}
+    for filename in os.listdir(args.dir_train):
+        print(filename)
+        path = os.path.join(args.dir_train, filename)
+        with open(path, encoding="utf-8") as f:
+            for i, line in enumerate(f):
+                text, label = line_to_data(line)
+                for char in text:
+                    if char not in char2freq:
+                        char2freq[char] = 0
+                    char2freq[char] += 1
+                if (i+1) % 100000 == 0:
+                    print("Nb lines processed: %d" % (i+1))
     srtd = sorted(char2freq.items(), key=lambda x:x[1], reverse=True)
     with open(args.path_out, 'w') as outfile:
         for char, freq in srtd:
