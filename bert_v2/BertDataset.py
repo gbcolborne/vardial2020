@@ -39,7 +39,8 @@ def line_to_data(line, is_labeled):
     else:
         text = line.strip()
         # Make sure text is not labeled
-        assert text[-4] != "\t"
+        if len(text) > 3:
+            assert text[-4] != "\t"
         label = None
     return (text, label)
 
