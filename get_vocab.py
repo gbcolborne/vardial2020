@@ -25,7 +25,7 @@ def main():
     parser.add_argument("path_out", help="Path of output file")
     args = parser.parse_args()
     char2freq = {}
-    for filename in os.listdir(args.dir_train):
+    for filename in sorted(os.listdir(args.dir_train)):
         print(filename)
         path = os.path.join(args.dir_train, filename)
         with open(path, encoding="utf-8") as f:
