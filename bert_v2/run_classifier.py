@@ -324,18 +324,21 @@ def main():
                         type=str,
                         required=True,
                         help="Dir containing pre-trained model (checkpoint), which may have been fine-tuned already.")
-    parser.add_argument("--dir_data",
+
+    # Required for certain modes (--do_train, --eval_during_training, --do_eval or --do_pred)
+    parser.add_argument("--dir_train",
                         type=str,
-                        required=True,
-                        help=("Dir containing data (files <lang>.train for training, <valid|test>.tsv for testing) "
-                              "Training data files only contains sentences. "
-                              "Validation data files must be in 2-column TSV format, with sentence and label. "
-                              "Test data may contain one or 2 columns."))
-    # Required for training
+                        help=("Dir containing training data (n files named <lang>.train containing unlabeled text)"))
     parser.add_argument("--dir_output",
                         type=str,
                         help="Directory in which model will be written (required if --do_train or --do_pred)")
-    
+    parser.add_argument("--path_dev",
+                        type=str,
+                        help="Path of 2-column TSV file containing labeled validation examples.")
+    parser.add_argument("--path_test",
+                        type=str,
+                        required=False,
+                        help="Path of text file containing unlabeled test examples.")
     # Execution modes
     parser.add_argument("--do_train",
                         action="store_true",
@@ -414,7 +417,8 @@ def main():
     if args.eval_during_training:
         assert args.do_train
     if args.do_train:
-        train_paths = glob.glob(os.path.join(args.dir_data, "*.train"))        
+        assert args.dir_train is not None
+        train_paths = glob.glob(os.path.join(args.dir_train, "*.train"))        
         assert len(train_paths) > 0
     if args.do_train or args.do_pred:
         assert args.dir_output is not None
@@ -424,11 +428,11 @@ def main():
         if not os.path.exists(args.dir_output):
             os.makedirs(args.dir_output)
     if args.do_eval or args.eval_during_training:
-        path_dev_data = os.path.join(args.dir_data, "valid.tsv")        
-        assert os.path.exists(path_dev_data)
+        assert args.path_dev is not None
+        assert os.path.exists(args.path_dev)
     if args.do_pred:
-        path_test_data = os.path.join(args.dir_data, "test.tsv")        
-        assert os.path.exists(path_test_data)
+        assert args.path_test is not None
+        assert os.path.exists(args.path_test)
     if args.grad_accum_steps < 1:
         raise ValueError("Invalid grad_accum_steps parameter: {}, should be >= 1".format(
                             args.grad_accum_steps))
@@ -519,8 +523,8 @@ def main():
         # Store lang2id in checkpoint data
         checkpoint_data["lang2id"] = lang2id
     if args.do_eval or args.eval_during_training:
-        logger.info("Loading validation data from %s..." % path_dev_data)                                
-        dev_dataset = BertDatasetForTesting(path_dev_data,
+        logger.info("Loading validation data from %s..." % args.path_dev)                                
+        dev_dataset = BertDatasetForTesting(args.path_dev,
                                             tokenizer,
                                             lang2id,
                                             max_seq_length,
@@ -528,8 +532,8 @@ def main():
                                             encoding="utf-8",
                                             verbose=DEBUG)
     if args.do_pred:
-        logger.info("Loading test data from %s..." % path_test_data)                                
-        test_dataset = BertDatasetForTesting(path_test_data,
+        logger.info("Loading test data from %s..." % args.path_test)                                
+        test_dataset = BertDatasetForTesting(args.path_test,
                                              tokenizer,
                                              lang2id,
                                              max_seq_length,
