@@ -16,7 +16,7 @@ def get_dataloader(dataset, batch_size, local_rank):
         return DataLoader(dataset, sampler=sampler, batch_size=batch_size)
     else:
         # BertDatasetForTraining is an IterableDataset, so we don't use a sampler
-        return Dataloader(dataset, batch_size=batch_size)
+        return DataLoader(dataset, batch_size=batch_size)
     
 
 def accuracy(pred_scores, labels, ignore_label=None):
