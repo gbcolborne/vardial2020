@@ -14,6 +14,7 @@ def log_stats(numbers, logger):
     logger.info("Median: {}".format(np.median(numbers)))    
     logger.info("# zeros: {}".format(sum(1 for x in numbers if x==0)))
 
+    
 def compute_sampling_probs(data_dir, alpha=1.0, rel_weight=1.0, logger=None):
     assert alpha >= 0 and alpha <= 1
     lang2prob = {}
@@ -54,7 +55,9 @@ def compute_sampling_probs_for_subgroup(lang_list, data_dir, alpha=1.0, logger=N
     for lang in lang_list:
         if logger: 
             logger.info("  %s" % lang)
-        lang2freq[lang] = sum(1 for (sent, text_id, url) in stream_sents(lang, data_dir, input_format="text-only"))
+        lang2freq[lang] = sum(1 for (sent, text_id, url) in stream_sents(lang,
+                                                                         data_dir,
+                                                                         input_format="text-only"))
     counts = np.array([lang2freq[k] for k in lang_list], dtype=np.float)
     probs = counts / counts.sum()
     probs_damp = probs ** alpha
@@ -97,7 +100,8 @@ def main():
     os.makedirs(outdir_train)
     os.makedirs(outdir_test)
 
-    # We expect that the input dir contains n files called lang.train, which contain unlabeled text (without labels, URLS or text IDs)
+    # We expect that the input dir contains n files called lang.train,
+    # which contain unlabeled text (without labels, URLS or text IDs)
     for n in os.listdir(args.input_dir):
         cut = n.index(".")
         lang = n[:cut]
@@ -209,16 +213,24 @@ def main():
     # Shuffle and write dev and test sets
     logger.info("Writing test data in %s..." % (outdir_test))
     np.random.shuffle(dev_set)
-    outpath_dev = os.path.join(outdir_test, "dev.tsv")
-    with open(outpath_dev, 'w') as outfile:
+    ptexts = os.path.join(outdir_test, "dev.txt")
+    plabels = os.path.join(outdir_test, "dev-gold-labels.txt")    
+    ptuples = os.path.join(outdir_test, "dev-labeled.tsv")
+    with open(ptexts, 'w') as ftexts, open(plabels, 'w') as flabels, open(ptuples, 'w') as ftuples:
         for (text, lang) in dev_set:
-            outfile.write("%s\t%s\n" % (text, lang))
+            ftexts.write(text + "\n")
+            flabels.write(lang + "\n")
+            ftuples.write("%s\t%s\n" % (text, lang))
     if len(test_set):
         np.random.shuffle(test_set)
-        outpath_test = os.path.join(outdir_test, "test.txt")
-        with open(outpath_test, 'w') as outfile:
+        ptexts = os.path.join(outdir_test, "test.txt")
+        plabels = os.path.join(outdir_test, "test-gold-labels.txt")    
+        ptuples = os.path.join(outdir_test, "test-labeled.tsv")
+        with open(ptexts, 'w') as ftexts, open(plabels, 'w') as flabels, open(ptuples, 'w') as ftuples:
             for (text, lang) in test_set:
-                outfile.write("%s\n" % text)
+                ftexts.write(text + "\n")
+                flabels.write(lang + "\n")
+                ftuples.write("%s\t%s\n" % (text, lang))
         
 if __name__ == "__main__":
     main()
