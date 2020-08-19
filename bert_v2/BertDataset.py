@@ -94,7 +94,7 @@ class BertDatasetForTraining(IterableDataset):
 
     """
 
-    def __init__(self, train_paths, tokenizer, seq_len, sampling_alpha=0.0, weight_relevant=1.0, encoding="utf-8", seed=None, verbose=False):
+    def __init__(self, train_paths, tokenizer, seq_len, sampling_alpha=1.0, weight_relevant=1.0, encoding="utf-8", seed=None, verbose=False):
         super(BertDatasetForTraining).__init__()
         assert sampling_alpha >= 0.0 and sampling_alpha <= 1.0
         self.tokenizer = tokenizer
@@ -278,7 +278,7 @@ class InputFeaturesForMLM(object):
     
 class BertDatasetForMLM(BertDatasetForTraining):
     
-    def __init__(self, train_paths, tokenizer, seq_len, sampling_alpha=0.0, weight_relevant=1.0, encoding="utf-8", seed=None, verbose=False):
+    def __init__(self, train_paths, tokenizer, seq_len, sampling_alpha=1.0, weight_relevant=1.0, encoding="utf-8", seed=None, verbose=False):
         # Init parent class
         super().__init__(train_paths, tokenizer, seq_len, sampling_alpha=sampling_alpha, weight_relevant=weight_relevant, encoding=encoding, seed=seed, verbose=verbose)
         return
@@ -403,7 +403,7 @@ class InputFeaturesForSPCAndMLM(object):
 
 class BertDatasetForSPCAndMLM(BertDatasetForTraining):
     
-    def __init__(self, train_paths, tokenizer, seq_len, sampling_alpha=0.0, weight_relevant=1.0, encoding="utf-8", seed=None, verbose=False):
+    def __init__(self, train_paths, tokenizer, seq_len, sampling_alpha=1.0, weight_relevant=1.0, encoding="utf-8", seed=None, verbose=False):
         # Init parent class
         super().__init__(train_paths, tokenizer, seq_len, sampling_alpha=sampling_alpha, weight_relevant=weight_relevant, encoding=encoding, seed=seed, verbose=verbose)
 
@@ -603,7 +603,7 @@ class InputFeaturesForClassification(object):
     
 class BertDatasetForClassification(BertDatasetForTraining):
     
-    def __init__(self, train_paths, tokenizer, seq_len, include_mlm=False, sampling_alpha=0.0, weight_relevant=1.0, encoding="utf-8", seed=None, verbose=False):
+    def __init__(self, train_paths, tokenizer, seq_len, include_mlm=False, sampling_alpha=1.0, weight_relevant=1.0, encoding="utf-8", seed=None, verbose=False):
         # Init parent class
         super().__init__(train_paths, tokenizer, seq_len, sampling_alpha=sampling_alpha, weight_relevant=weight_relevant, encoding=encoding, seed=seed, verbose=verbose)
         self.include_mlm = include_mlm
