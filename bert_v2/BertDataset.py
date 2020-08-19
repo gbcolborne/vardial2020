@@ -143,7 +143,7 @@ class BertDatasetForTraining(IterableDataset):
         
         # Prepare training files to sample lazily from disk
         for lang in self.lang_list:
-            path = lang2path[lang]
+            path = self.lang2path[lang]
             logger.info("Processing %s" % path)            
             # Open file to load lazily from disk later when we start iterating
             self.lang2file[lang] = open(path, 'r', encoding=self.encoding)
