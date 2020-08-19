@@ -217,9 +217,9 @@ class BertDatasetForTraining(IterableDataset):
         rel_langs = sorted(RELEVANT_LANGS)
         irr_langs = sorted(IRRELEVANT_LANGS)
         logger.info("Computing sampling probabilities for relevant languages...")
-        rel_probs = compute_sampling_probs_for_subgroup(rel_langs, data_dir, alpha=alpha, logger=logger)
+        rel_probs = self._compute_sampling_probs_for_subgroup(rel_langs)
         logger.info("Computing sampling probabilities for irrelevant languages...")
-        irr_probs = compute_sampling_probs_for_subgroup(irr_langs, data_dir, alpha=alpha, logger=logger)
+        irr_probs = self._compute_sampling_probs_for_subgroup(irr_langs)
         # Weight the distribution of relevant languages, then renormalize
         rel_probs = rel_probs * self.weight_relevant
         sum_of_both = rel_probs.sum() + irr_probs.sum()
@@ -232,15 +232,15 @@ class BertDatasetForTraining(IterableDataset):
         for lang, prob in zip(irr_langs, irr_probs):
             lang_id = self.lang2id[lang]
             sample_probs[lang_id] = prob
-        logger.info("  Stats on sampling probabilities:")
-        logger.info("    Min prob (relevant): %f" % (min(rel_probs)))
-        logger.info("    Mean prob (relevant): %f" % (np.mean(rel_probs)))        
-        logger.info("    Max prob (relevant): %f" % (max(rel_probs)))
-        logger.info("    Cumulative prob (relevant): %f" % (sum(rel_probs)))        
-        logger.info("    Min prob (irrelevant): %f" % (min(irr_probs)))
-        logger.info("    Mean prob (irrelevant): %f" % (np.mean(irr_probs)))        
-        logger.info("    Max prob (irrelevant): %f" % (max(irr_probs)))
-        logger.info("    Cumulative prob (irrelevant): %f" % (sum(irr_probs)))        
+        logger.info("Stats on sampling probabilities:")
+        logger.info("- Min prob (relevant): %f" % (min(rel_probs)))
+        logger.info("- Mean prob (relevant): %f" % (np.mean(rel_probs)))        
+        logger.info("- Max prob (relevant): %f" % (max(rel_probs)))
+        logger.info("- Cumulative prob (relevant): %f" % (sum(rel_probs)))        
+        logger.info("- Min prob (irrelevant): %f" % (min(irr_probs)))
+        logger.info("- Mean prob (irrelevant): %f" % (np.mean(irr_probs)))        
+        logger.info("- Max prob (irrelevant): %f" % (max(irr_probs)))
+        logger.info("- Cumulative prob (irrelevant): %f" % (sum(irr_probs)))        
         return sample_probs
 
 
