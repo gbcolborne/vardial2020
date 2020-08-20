@@ -78,7 +78,7 @@ def predict(model, pooler, classifier, eval_dataset, args):
 
     """
     assert type(eval_dataset) == BertDatasetForTesting
-    dataloader = get_dataloader(eval_dataset, args.eval_batch_size, args.local_rank, shuffle=False)
+    dataloader = get_dataloader(eval_dataset, args.eval_batch_size, args.local_rank)
     scores = []
     model.eval()
     pooler.eval()
@@ -123,9 +123,8 @@ def train(model, pooler, classifier, optimizer, train_dataset, args, checkpoint_
     assert type(train_dataset) == BertDatasetForClassification
     if args.eval_during_training:
         assert dev_dataset is not None
-        type(dev_dataset) == BertDatasetForTesting
+        assert type(dev_dataset) == BertDatasetForTesting
     if unk_dataset is not None:
-        assert len(train_dataset) == len(unk_dataset)
         assert type(unk_dataset) == BertDatasetForMLM
             
     # Write header in log
@@ -138,6 +137,15 @@ def train(model, pooler, classifier, optimizer, train_dataset, args, checkpoint_
     with open(args.train_log_path, "w") as f:
         f.write(header + "\n")
 
+    # Make dataloader(s). Note: since BertDatasetForTraining and its
+    # subclasses are IterableDatasets (i.e. streams), the loader is an
+    # iterable (with no end and no __len__) that we call with iter().
+    train_dataloader = get_dataloader(train_dataset, args.train_batch_size, args.local_rank)
+    train_batch_sampler = iter(train_dataloader)     
+    if unk_dataset is not None:
+        unk_dataloader = get_dataloader(unk_dataset, args.train_batch_size, args.local_rank)
+        unk_batch_enum = enumerate(iter(unk_dataloader))
+        
     # Start training
     logger.info("***** Running training *****")
     if args.eval_during_training:
@@ -146,19 +154,7 @@ def train(model, pooler, classifier, optimizer, train_dataset, args, checkpoint_
         model.train()
         pooler.train()
         classifier.train()
-        # Get fresh training samples
-        if epoch > 0:
-              train_dataset.resample()
-              if unk_dataset is not None:
-                  unk_dataset.resample()
                   
-        # Make dataloader(s)
-        train_dataloader = get_dataloader(train_dataset, args.train_batch_size, args.local_rank, shuffle=True)
-        if unk_dataset is not None:
-            unk_dataloader = get_dataloader(unk_dataset, args.train_batch_size, args.local_rank, shuffle=True)
-            assert len(unk_dataloader) == len(train_dataloader)           
-            unk_batch_enum = enumerate(unk_dataloader)
-        
         # Some stats for this epoch
         real_batch_sizes = []
         lid_losses = []
@@ -170,8 +166,8 @@ def train(model, pooler, classifier, optimizer, train_dataset, args, checkpoint_
         grad_norms = []
         
         # Run training for one epoch
-        for step, batch in enumerate(tqdm(train_dataloader, desc="Iteration")):
-            # Unpack batch
+        for step in trange(int(args.num_train_steps_per_epoch), desc="Iteration"):
+            batch = next(train_batch_sampler)
             batch = tuple(t.to(args.device) for t in batch)
             input_ids = batch[0]
             input_mask = batch[1]
@@ -364,10 +360,14 @@ def main():
                         action="store_true",
                         help=("Use average pooling of all last hidden states, rather than just the last hidden state of CLS, to do classification. "
                               "Note that in either case, the pooled vector passes through a square linear layer and a tanh before the classification layer."))
-    parser.add_argument("--sampling_distro",
-                        choices=["uniform", "relfreq", "dampfreq"],
-                        default="relfreq",
-                        help="Distribution used for sampling training data within each group (relevant, confound, and irrelevant)")
+    parser.add_argument("--sampling_alpha",
+                        type=float,
+                        default=1.0,
+                        help="Dampening factor for relative frequencies used to compute language sampling probabilities")
+    parser.add_argument("--weight_relevant",
+                        type=float,
+                        default=1.0,
+                        help="Relative sampling frequency of relevant languages wrt irrelevant languages")
     parser.add_argument("--train_batch_size",
                         default=16,
                         type=int,
@@ -394,6 +394,10 @@ def main():
                         default=1000000,
                         type=int,
                         help="Maximum number of training steps to perform. Note: # optimization steps = # train steps / # accumulation steps.")
+    parser.add_argument("--num_train_steps_per_epoch",
+                        default=1000,
+                        type=int,
+                        help="Number of training steps that equals one epoch. Note: # optimization steps = # train steps / # accumulation steps.")    
     parser.add_argument('--grad_accum_steps',
                         type=int,
                         default=1,
@@ -495,19 +499,20 @@ def main():
             logger.info("Loading MLM-only data from %s..." % path_unk)            
             unk_dataset = BertDatasetForMLM([path_unk],
                                             tokenizer,
-                                            seq_len=max_seq_length,
-                                            unk_only=True,
-                                            sampling_distro=args.sampling_distro,
+                                            max_seq_length,
+                                            sampling_alpha=args.sampling_alpha,
+                                            weight_relevant=args.weight_relevant,
                                             encoding="utf-8",
                                             seed=args.seed,
                                             verbose=DEBUG)
 
-        logger.info("Loading training data from %s training files in %s..." % (len(train_paths),args.dir_data))
+        logger.info("Loading training data from %s training files in %s..." % (len(train_paths),args.dir_train))
         train_dataset = BertDatasetForClassification(train_paths,
                                                      tokenizer,
                                                      max_seq_length,
                                                      include_mlm=True,
-                                                     sampling_distro=args.sampling_distro,
+                                                     sampling_alpha=args.sampling_alpha,
+                                                     weight_relevant=args.weight_relevant,
                                                      encoding="utf-8",
                                                      seed=args.seed,
                                                      verbose=DEBUG)
@@ -552,7 +557,6 @@ def main():
     model.load_state_dict(checkpoint_data["model_state_dict"])
     model.to(args.device)
         
-
     # Create pooler and classifier, load pretrained weights if present
     if "pooler_state_dict" in checkpoint_data:
         logger.info("Loading pooler...")
@@ -604,7 +608,7 @@ def main():
         # Prepare optimizer
         checkpoint_data["global_step"] = 0
         checkpoint_data["max_opt_steps"] = args.max_train_steps // args.grad_accum_steps
-        num_opt_steps_per_epoch = int(len(train_dataset) / args.train_batch_size / args.grad_accum_steps)
+        num_opt_steps_per_epoch = args.num_train_steps_per_epoch // args.grad_accum_steps
         args.num_epochs = math.ceil(checkpoint_data["max_opt_steps"] / num_opt_steps_per_epoch)
         logger.info("Preparing optimizer...")
         np_list = list(model.named_parameters())
@@ -631,6 +635,7 @@ def main():
         logger.info("  Max optimization steps: %d" % checkpoint_data["max_opt_steps"])
         logger.info("  Training dataset size: %d" % len(train_dataset))
         logger.info("  Batch size: %d" % args.train_batch_size)
+        logger.info("  # training steps/epoch: %d" % (args.num_train_steps_per_epoch))            
         logger.info("  # optimization steps/epoch: %d" % num_opt_steps_per_epoch)
         logger.info("  # epochs to do: %d" % args.num_epochs)
         if args.eval_during_training:
