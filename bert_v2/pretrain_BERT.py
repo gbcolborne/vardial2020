@@ -68,7 +68,6 @@ def train(model, pooler, tokenizer, optimizer, scheduler, dataset, args, checkpo
     # iterable (with no end and no __len__) that we call with iter().
     dataloader = get_dataloader(dataset, args.train_batch_size, args.local_rank)
     train_batch_sampler = iter(dataloader) 
-    
     if extra_mlm_dataset is not None:
         mlm_dataloader = get_dataloader(extra_mlm_dataset, args.train_batch_size, args.local_rank)
         mlm_batch_enum = enumerate(iter(mlm_dataloader))
@@ -501,7 +500,7 @@ def main():
         train_dataset_spc = None
         train_dataset_mlm = BertDatasetForMLM(train_paths,
                                               tokenizer,
-                                              seq_len=max_seq_length,
+                                              max_seq_length,
                                               sampling_alpha=args.sampling_alpha,
                                               weight_relevant=args.weight_relevant,
                                               encoding="utf-8",
@@ -514,7 +513,7 @@ def main():
             train_paths.remove(path_unk)
         train_dataset_spc = BertDatasetForSPCAndMLM(train_paths,
                                                     tokenizer,
-                                                    seq_len=max_seq_length,
+                                                    max_seq_length,
                                                     sampling_alpha=args.sampling_alpha,
                                                     weight_relevant=args.weight_relevant,
                                                     encoding="utf-8",
@@ -527,7 +526,7 @@ def main():
             # is used for MLM only.
             train_dataset_mlm = BertDatasetForMLM([path_unk],
                                                   tokenizer,
-                                                  seq_len=max_seq_length,
+                                                  max_seq_length,
                                                   sampling_alpha=args.sampling_alpha,
                                                   weight_relevant=args.weight_relevant,
                                                   encoding="utf-8",
