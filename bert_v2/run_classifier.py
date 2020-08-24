@@ -442,13 +442,13 @@ def main():
                             args.grad_accum_steps))
 
     # Distributed or parallel?
-    if args.local_rank != -1 or args.n_gpu > 1:
+    if args.local_rank != -1 or args.num_gpus > 1:
         raise NotImplementedError("No distributed or parallel training available at the moment.")
     if torch.cuda.is_available():
         args.device = torch.device("cuda")
         args.n_gpu = 1
     else:
-        args.device = torch device("cpu")
+        args.device = torch.device("cpu")
         args.n_gpu = 0
         
     # Seed RNGs
