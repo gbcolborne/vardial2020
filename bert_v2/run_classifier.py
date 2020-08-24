@@ -136,7 +136,7 @@ def train(model, pooler, classifier, optimizer, train_dataset, args, checkpoint_
         header += "\tDevLoss\tDevF1Track1\tDevF1Track2\tDevF1Track3"
     with open(args.train_log_path, "w") as f:
         f.write(header + "\n")
-
+        
     # Make dataloader(s). Note: since BertDatasetForTraining and its
     # subclasses are IterableDatasets (i.e. streams), the loader is an
     # iterable (with no end and no __len__) that we call with iter().
@@ -441,25 +441,16 @@ def main():
         raise ValueError("Invalid grad_accum_steps parameter: {}, should be >= 1".format(
                             args.grad_accum_steps))
 
-    # What GPUs do we use?
-    if args.num_gpus == -1:
-        args.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        args.n_gpu = torch.cuda.device_count()
-        device_ids = None
-    else:
-        args.device = torch.device("cuda" if torch.cuda.is_available() and args.num_gpus > 0 else "cpu")
-        args.n_gpu = args.num_gpus
-        if args.n_gpu > 1:
-            device_ids = list(range(args.n_gpu))
-    if args.local_rank != -1:
-        torch.cuda.set_device(args.local_rank)
-        args.device = torch.device("cuda", args.local_rank)
+    # Distributed or parallel?
+    if args.local_rank != -1 or args.n_gpu > 1:
+        raise NotImplementedError("No distributed or parallel training available at the moment.")
+    if torch.cuda.is_available():
+        args.device = torch.device("cuda")
         args.n_gpu = 1
-        # Initializes the distributed backend which will take care of sychronizing nodes/GPUs
-        torch.distributed.init_process_group(backend='nccl')
-    logger.info("device: {} n_gpu: {}, distributed training: {}".format(
-        args.device, args.n_gpu, bool(args.local_rank != -1)))
-    
+    else:
+        args.device = torch device("cpu")
+        args.n_gpu = 0
+        
     # Seed RNGs
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -583,25 +574,11 @@ def main():
         classifier.load_state_dict(checkpoint_data["classifier_state_dict"])
     classifier.to(args.device)
 
-    # Distributed or parallel?
-    if args.local_rank != -1:
-        try:
-            from apex.parallel import DistributedDataParallel as DDP
-        except ImportError:
-            raise ImportError("Please install apex from https://www.github.com/nvidia/apex to use distributed training.")
-        model = DDP(model)
-        pooler = DDP(pooler)
-        classifier = DDP(classifier)
-    elif args.n_gpu > 1:
-        model = torch.nn.DataParallel(model, device_ids=device_ids)
-        pooler = torch.nn.DataParallel(pooler, device_ids=device_ids)
-        classifier = torch.nn.DataParallel(classifier, device_ids=device_ids)
-
     # Log some info on the model
-    logger.info("Model config: %s" % repr(get_module(model).config))
-    logger.info("Nb params: %d" % count_params(get_module(model)))
-    logger.info("Nb params in pooler: %d" % count_params(get_module(pooler)))
-    logger.info("Nb params in classifier: %d" % count_params(get_module(classifier)))
+    logger.info("Model config: %s" % repr(model.config))
+    logger.info("Nb params: %d" % count_params(model))
+    logger.info("Nb params in pooler: %d" % count_params(pooler))
+    logger.info("Nb params in classifier: %d" % count_params(classifier))
         
     # Training
     if args.do_train:
