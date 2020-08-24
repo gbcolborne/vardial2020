@@ -6,6 +6,14 @@ from torch.utils.data.distributed import DistributedSampler
 from BertDataset import BertDatasetForTesting
 
 
+def get_module(module):
+    """Return model's module attribute if it exits, otherwise return the
+    model itself. This can be useful when using torch.nn.DataParallel,
+    for instance.
+
+    """
+    return model.module if hasattr(model, 'module') else model
+
 def get_dataloader(dataset, batch_size, local_rank):
     """ Get data loader. """
     if isinstance(dataset, BertDatasetForTesting):

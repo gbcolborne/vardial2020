@@ -14,7 +14,7 @@ from CharTokenizer import CharTokenizer
 from BertDataset import BertDatasetForClassification, BertDatasetForMLM, BertDatasetForTesting, NO_MASK_LABEL
 from Pooler import Pooler
 from Classifier import Classifier
-from utils import check_for_unk_train_data, adjust_loss, weighted_avg, count_params, accuracy, get_dataloader
+from utils import check_for_unk_train_data, adjust_loss, weighted_avg, count_params, accuracy, get_dataloader, get_module
 sys.path.append("..")
 from comp_utils import ALL_LANGS
 from scorer import compute_fscores
@@ -302,9 +302,9 @@ def train(model, pooler, classifier, optimizer, train_dataset, args, checkpoint_
             else:
                 save = False
         if save:
-            model_to_save = model.module if hasattr(model, 'module') else model
-            pooler_to_save = pooler.module if hasattr(pooler, 'module') else pooler
-            classifier_to_save = classifier.module if hasattr(classifier, 'module') else classifier        
+            model_to_save = get_module(model)
+            pooler_to_save = get_module(pooler)
+            classifier_to_save = get_module(classifier)
             checkpoint_data['model_state_dict'] = model_to_save.state_dict()
             checkpoint_data['pooler_state_dict'] = pooler_to_save.state_dict()
             checkpoint_data['classifier_state_dict'] = classifier_to_save.state_dict()        
@@ -598,10 +598,10 @@ def main():
         classifier = torch.nn.DataParallel(classifier, device_ids=device_ids)
 
     # Log some info on the model
-    logger.info("Model config: %s" % repr(model.config))
-    logger.info("Nb params: %d" % count_params(model))
-    logger.info("Nb params in pooler: %d" % count_params(pooler))        
-    logger.info("Nb params in classifier: %d" % count_params(classifier))
+    logger.info("Model config: %s" % repr(get_module(model).config))
+    logger.info("Nb params: %d" % count_params(get_module(model)))
+    logger.info("Nb params in pooler: %d" % count_params(get_module(pooler)))
+    logger.info("Nb params in classifier: %d" % count_params(get_module(classifier)))
         
     # Training
     if args.do_train:
