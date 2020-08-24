@@ -151,7 +151,10 @@ def train(model, pooler, classifier, optimizer, train_dataset, args, checkpoint_
     if args.eval_during_training:
         best_score = -1
     for epoch in trange(int(args.num_epochs), desc="Epoch"):
-        model.train()
+        if args.freeze_encoder:
+            model.eval()
+        else:
+            model.train()
         pooler.train()
         classifier.train()
                   
@@ -188,15 +191,16 @@ def train(model, pooler, classifier, optimizer, train_dataset, args, checkpoint_
             lid_encodings = pooler(lid_last_hidden_states)
             lid_scores = classifier(lid_encodings)
 
-            # Call BERT encoder to get encoding of masked input sequences
-            mlm_outputs = model.bert(input_ids=masked_input_ids,
-                                     attention_mask=input_mask,
-                                     token_type_ids=segment_ids,
-                                     position_ids=None)
-            mlm_last_hidden_states = mlm_outputs[0]
+            if not args.no_mlm:
+                # Call BERT encoder to get encoding of masked input sequences
+                mlm_outputs = model.bert(input_ids=masked_input_ids,
+                                         attention_mask=input_mask,
+                                         token_type_ids=segment_ids,
+                                         position_ids=None)
+                mlm_last_hidden_states = mlm_outputs[0]
 
-            # Do MLM on last hidden states
-            mlm_pred_scores = model.cls(mlm_last_hidden_states)
+                # Do MLM on last hidden states
+                mlm_pred_scores = model.cls(mlm_last_hidden_states)
 
             # Do MLM on unk_dataset if present
             if unk_dataset is not None:
@@ -218,9 +222,10 @@ def train(model, pooler, classifier, optimizer, train_dataset, args, checkpoint_
             loss_fct = CrossEntropyLoss(reduction="mean")
             loss = loss_fct(lid_scores, label_ids)
             lid_losses.append(loss.item())
-            mlm_loss = loss_fct(mlm_pred_scores.view(-1, model.config.vocab_size), lm_label_ids.view(-1))
-            mlm_losses.append(mlm_loss.item())
-            loss = loss + mlm_loss
+            if not args.no_mlm:
+                mlm_loss = loss_fct(mlm_pred_scores.view(-1, model.config.vocab_size), lm_label_ids.view(-1))
+                mlm_losses.append(mlm_loss.item())
+                loss = loss + mlm_loss
             if unk_dataset is not None:
                 unk_mlm_loss = loss_fct(unk_mlm_pred_scores.view(-1, model.config.vocab_size), xlm_label_ids.view(-1))
                 loss = loss + unk_mlm_loss
@@ -240,8 +245,9 @@ def train(model, pooler, classifier, optimizer, train_dataset, args, checkpoint_
             # Compute accuracies
             lid_acc = accuracy(lid_scores, label_ids)
             lid_accs.append(lid_acc)
-            mlm_acc = accuracy(mlm_pred_scores.view(-1, model.config.vocab_size), lm_label_ids.view(-1), ignore_label=NO_MASK_LABEL)
-            mlm_accs.append(mlm_acc)
+            if not args.no_mlm:
+                mlm_acc = accuracy(mlm_pred_scores.view(-1, model.config.vocab_size), lm_label_ids.view(-1), ignore_label=NO_MASK_LABEL)
+                mlm_accs.append(mlm_acc)
             if unk_dataset is not None:
                 unk_mlm_acc = accuracy(unk_mlm_pred_scores.view(-1, model.config.vocab_size), xlm_label_ids.view(-1), ignore_label=NO_MASK_LABEL)
                 unk_mlm_accs.append(unk_mlm_acc)
@@ -258,8 +264,9 @@ def train(model, pooler, classifier, optimizer, train_dataset, args, checkpoint_
         last_grad_norm = grad_norms[-1]
         avg_lid_loss = weighted_avg(lid_losses, real_batch_sizes)
         avg_lid_acc = weighted_avg(lid_accs, real_batch_sizes)
-        avg_mlm_loss = weighted_avg(mlm_losses, real_batch_sizes)        
-        avg_mlm_acc = weighted_avg(mlm_accs, real_batch_sizes)
+        if not args.no_mlm:
+            avg_mlm_loss = weighted_avg(mlm_losses, real_batch_sizes)        
+            avg_mlm_acc = weighted_avg(mlm_accs, real_batch_sizes)
         if unk_dataset is not None:
             avg_unk_mlm_loss = weighted_avg(unk_mlm_losses, real_batch_sizes)
             avg_unk_mlm_acc = weighted_avg(unk_mlm_accs, real_batch_sizes)
@@ -278,8 +285,9 @@ def train(model, pooler, classifier, optimizer, train_dataset, args, checkpoint_
         log_data.append(str(checkpoint_data["global_step"]))
         log_data.append("{:.5f}".format(avg_lid_loss))
         log_data.append("{:.5f}".format(avg_lid_acc))
-        log_data.append("{:.5f}".format(avg_mlm_loss))
-        log_data.append("{:.5f}".format(avg_mlm_acc))
+        if not args.no_mlm:
+            log_data.append("{:.5f}".format(avg_mlm_loss))
+            log_data.append("{:.5f}".format(avg_mlm_acc))
         if unk_dataset is not None:
             log_data.append("{:.5f}".format(avg_unk_mlm_loss))
             log_data.append("{:.5f}".format(avg_unk_mlm_acc))
@@ -356,6 +364,12 @@ def main():
                         help="Score to optimize on dev set during training (by early stopping).")
     
     # Hyperparameters
+    parser.add_argument("--freeze_encoder",
+                        action="store_true",
+                        help="Freeze weights of pre-trained encoder. (Note: in this case, we do not keep doing MLM.)")
+    parser.add_argument("--no_mlm",
+                        action="store_true",
+                        help="Do not keep doing masked language modeling (MLM) during fine-tuning.")
     parser.add_argument("--avgpool",
                         action="store_true",
                         help=("Use average pooling of all last hidden states, rather than just the last hidden state of CLS, to do classification. "
@@ -440,7 +454,10 @@ def main():
     if args.grad_accum_steps < 1:
         raise ValueError("Invalid grad_accum_steps parameter: {}, should be >= 1".format(
                             args.grad_accum_steps))
-
+    if args.do_train and args.freeze_encoder and not args.no_mlm:
+        logger.warning("Setting --no_mlm to True since --freeze_encoder is True, therefore doing MLM would be pointless.")
+        args.no_mlm = True
+        
     # Distributed or parallel?
     if args.local_rank != -1 or args.num_gpus > 1:
         raise NotImplementedError("No distributed or parallel training available at the moment.")
@@ -588,7 +605,9 @@ def main():
         num_opt_steps_per_epoch = args.num_train_steps_per_epoch // args.grad_accum_steps
         args.num_epochs = math.ceil(checkpoint_data["max_opt_steps"] / num_opt_steps_per_epoch)
         logger.info("Preparing optimizer...")
-        np_list = list(model.named_parameters())
+        np_list = []
+        if not args.freeze_encoder:
+            np_list += list(model.named_parameters())
         np_list += list(pooler.named_parameters())
         np_list += list(classifier.named_parameters())        
         no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
