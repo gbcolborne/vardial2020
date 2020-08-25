@@ -160,8 +160,8 @@ class BertDatasetForTraining(IterableDataset):
         logger.info("Dataset size: %d" % self.size)
 
         # Skip a random number of lines.
+        logger.info("Skipping random number of lines...")
         for lang in self.lang_list:
-            logger.info("Skipping random number of lines...")
             self.lang2ix[lang] = random.randint(0, self.lang2freq[lang])
         
         # Compute sampling probabilities
