@@ -128,7 +128,9 @@ def train(model, pooler, classifier, optimizer, train_dataset, args, checkpoint_
         assert type(unk_dataset) == BertDatasetForMLM
             
     # Write header in log
-    header = "GlobalStep\tLossLangID\tAccuracyLangID\tLossMLM\tAccuracyMLM"
+    header = "GlobalStep\tLossLangID\tAccuracyLangID"
+    if not args.no_mlm:
+        header += "\tLossMLM\tAccuracyMLM"
     if unk_dataset is not None:
         header += "\tLossUnkMLM\tAccuracyUnkMLM"
     header += "\tGradNorm\tWeightNorm"
@@ -145,6 +147,25 @@ def train(model, pooler, classifier, optimizer, train_dataset, args, checkpoint_
     if unk_dataset is not None:
         unk_dataloader = get_dataloader(unk_dataset, args.train_batch_size, args.local_rank)
         unk_batch_enum = enumerate(iter(unk_dataloader))
+
+    # Evaluate model on dev set
+    if args.eval_during_training:
+        logger.info("Evaluating model on dev set before we start training...")
+        dev_scores = evaluate(model, pooler, classifier, dev_dataset, args)            
+        log_data = []
+        log_data.append(str(checkpoint_data["global_step"]))
+        log_data += ["", ""]
+        if not args.no_mlm:
+            log_data += ["", ""]            
+        if unk_dataset is not None:
+            log_data += ["", ""]
+        log_data += ["", ""]                                    
+        log_data.append("{:.5f}".format(dev_scores["loss"]))
+        log_data.append("{:.5f}".format(dev_scores["track1"]))
+        log_data.append("{:.5f}".format(dev_scores["track2"]))
+        log_data.append("{:.5f}".format(dev_scores["track3"]))                            
+        with open(args.train_log_path, "a") as f:
+            f.write("\t".join(log_data)+"\n")
         
     # Start training
     logger.info("***** Running training *****")
