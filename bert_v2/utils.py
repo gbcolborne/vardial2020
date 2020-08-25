@@ -59,7 +59,8 @@ def weighted_avg(vals, weights):
     assert len(vals.shape) == 1
     assert vals.shape == weights.shape
     probs = weights / weights.sum()
-    return np.sum(vals * probs)    
+    weighted_sum = np.sum(vals * probs)    
+    return weighted_sum
 
 
 def adjust_loss(loss, args):
