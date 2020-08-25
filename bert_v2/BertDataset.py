@@ -154,11 +154,16 @@ class BertDatasetForTraining(IterableDataset):
             with open(path, 'r', encoding=self.encoding) as f:
                 for line in f:
                     (text, label) = line_to_data(line, False)
-                    if text is not None:
-                        self.lang2freq[lang] += 1
+                    assert text is not None
+                    self.lang2freq[lang] += 1
         self.size = sum(self.lang2freq.values())
         logger.info("Dataset size: %d" % self.size)
 
+        # Skip a random number of lines.
+        for lang in self.lang_list:
+            logger.info("Skipping random number of lines...")
+            self.lang2ix[lang] = random.randint(0, self.lang2freq[lang])
+        
         # Compute sampling probabilities
         self.sample_probs = self._compute_sampling_probs()
 
