@@ -162,8 +162,11 @@ class BertDatasetForPretraining(IterableDataset):
         # Skip a random number of lines.
         logger.info("Skipping random number of lines...")
         for lang in self.lang_list:
-            self.lang2ix[lang] = random.randint(0, self.lang2freq[lang])
-        
+            start = random.randint(0, self.lang2freq[lang])
+            self.lang2ix[lang] = start
+            for _ in range(start):
+                next(self.lang2file[lang])
+                
         # Compute sampling probabilities
         self.sample_probs = self._compute_sampling_probs()
 
