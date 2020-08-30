@@ -1,4 +1,4 @@
-""" Dataset classes for training BERT """
+s""" Dataset classes for training BERT """
 
 import sys, os, random, logging
 from io import open
@@ -644,19 +644,6 @@ class BertDatasetForClassification(Dataset):
         assert self.target_lang in ALL_LANGS
         all_langs = sorted(ALL_LANGS)
         self.lang2id = {x:i for i,x in enumerate(all_langs)}
-
-        # Compute corpus sizes
-        lang2freq = {}
-        for lang in all_langs:
-            path = os.path.join(self.dir_data, "%s.train" % lang)
-            # Count number of lines
-            logger.info("Counting lines in %s" % path)
-            lang2freq[lang] = 0
-            with open(path, 'r', encoding=encoding) as f:
-                for line in f:
-                    (text, label) = line_to_data(line, False)
-                    assert text is not None
-                    lang2freq[lang] += 1
             
         # Load all positive examples
         data = []
@@ -668,7 +655,32 @@ class BertDatasetForClassification(Dataset):
                 assert text is not None
                 data.append((text, 1, self.target_lang))
         nb_pos = len(data)
+        lengths = [len(x) for (x,y,z) in data]
+        min_pos_length = min(lengths)
+        max_pos_length = max(lengths)
         logger.info("Nb positive examples: %d" % nb_pos)
+        logger.info("Min length of positive examples: %d" % min_pos_length)
+        logger.info("Max length of positive examples: %d" % max_pos_length)
+
+        # Compute corpus sizes, ignoring examples that are shorter
+        # than the shortest positive example or longer than the
+        # longest
+        lang2freq = {}
+        for lang in all_langs:
+            path = os.path.join(self.dir_data, "%s.train" % lang)
+            # Count number of examples
+            logger.info("Counting examples in %s" % path)
+            lang2freq[lang] = 0
+            with open(path, 'r', encoding=encoding) as f:
+                for line in f:
+                    (text, label) = line_to_data(line, False)
+                    assert text is not None
+                    if len(text) >= min_pos_length and len(text) <= max_pos_length:
+                        lang2freq[lang] += 1
+            if lang2freq[lang] == 0:
+                msg = "No examples found for lang '%s'" % lang
+                msg += " (ignoring texts shorter than %d or longer than %d chars)" % (min_pos_length, max_pos_length)
+                logger.warning(msg)
         
         # Compute the sampling probabilities of the relevant and
         # irrelevant languages independently.
@@ -705,60 +717,103 @@ class BertDatasetForClassification(Dataset):
         logger.info("- Cumulative prob (irrelevant): %f" % (sum(irr_probs)))        
 
         # Count number of negative examples we sample from each of the
-        # other languages
-        sample_sizes = [int(x) for x in saferound(sample_probs * nb_pos, 0, "largest")]
-
-        # Check sample sizes. We don't want to sample any example
-        # twice, as they might end up in the same batch (since we sort
-        # the data by length).
-        for i in range(len(sample_sizes)):
-            lang = all_langs[i]
-            freq = lang2freq[lang]
-            sample_size = sample_sizes[i]
-            if sample_size > freq:
-                msg = "Reducing sample size of %s from %d to %d" % (lang, sample_size, freq)
-                logger.warning(msg)
-                sample_sizes[i] = freq
-                nb_removed += (sample_size - freq)
-        if nb_removed:
-            msg = "Nb negative examples removed: %d" % nb_removed
-            logger.warning(msg)
-            
+        # other languages. Avoid sampling the same example twice.
+        sample_sizes = [0 for _ in all_langs]
+        nb_neg = 0
+        buffer_size = 10**6
+        samples = np.random.choice(np.arange(len(all_langs)),
+                                   size=buffer_size,
+                                   replace=True,
+                                   p=sample_probs)
+        sample_ix = 0
+        while nb_neg < nb_pos:
+            lang_id = samples[sample_ix]
+            lang = all_langs[lang_id]
+            if lang == self.target_lang:
+                msg = "Sampled target lang even though it should have 0 probability."
+                raise RuntimeError(msg)
+            if sample_sizes[lang_id] < lang2freq[lang]:
+                sample_sizes[lang_id] += 1
+                nb_neg += 1
+            sample_ix += 1
+            if sample_ix >= buffer_size:
+                # Refresh buffer
+                samples = np.random.choice(np.arange(len(all_langs)),
+                                           size=buffer_size,
+                                           replace=True,
+                                           p=sample_probs)
+                sample_ix = 0
+                            
         # Sample negative examples one language at a time
+        logger.info("Sampling negative examples")
         for lang, sample_size in zip(all_langs, sample_sizes):
             if lang == self.target_lang:
                 assert sample_size == 0
                 continue
             path = os.path.join(self.dir_data, "%s.train" % lang)
-            logger.info("Sampling %d examples from %s" % (sample_size, path))
-            if sample_size >= lang2freq[lang]:
-                USE_ALL = True
-            else:
-                USE_ALL = False
-                sampled_line_ids = np.random.choice(np.arange(lang2freq[lang]),
-                                                    size=sample_size,
-                                                    replace=False)
-                sampled_line_ids = sorted(sampled_line_ids)
-                sample_ix = 0
-            with open(path, 'r', encoding=encoding) as f:
-                for line_id, line in enumerate(f):
+            if sample_size == 0:
+                logger.info("  Not sampling from %s (no examples of appropriate length)" % path)
+                continue
+            logger.info("  Sampling %d examples from %s" % (sample_size, path))
+            texts = []
+            # Load all texts of appropriate length
+            with open(path, 'r', encoding=self.encoding) as f:
+                for line in f:
                     (text, label) = line_to_data(line, False)
                     assert text is not None
-                    if USE_ALL:
-                        data.append((text, 0 lang))
-                    elif line_id == sampled_line_ids[sample_ix]:
-                        data.append((text, 0, lang))
-                        sample_ix += 1
-                        if sample_ix >= sample_size:
-                            # We are done sampling
-                            break
+                    if len(text) >= min_pos_length and len(text) <= max_pos_length:
+                        texts.append(text)
+            # Sample
+            np.random.shuffle(texts)
+            for text in texts[:sample_size]:
+                data.append((text, 0, lang))
 
         # Sort examples by length
         logger.info("Sorting examples")
         sorted_examples = sorted(data, key=lambda x:len(x[0]), reverse=False)
-        print("Dataset size: %d" % len(self))
 
+        # Shuffle examples of same length
+        beg_ix = 0
+        max_cont = self._get_max_contiguous_same_label(sorted_examples)
+        logger.info("Max contiguous examples with same label: %d" % (max_cont))
+        logger.info("Shuffling examples of same length")
+        while end_ix < len(sorted_examples):
+            beg_label = sorted_examples[beg_ix][1]
+            end_ix = beg_ix
+            while sorted_examples[end_ix+1][1] == beg_label:
+                end_ix += 1
+                if end_ix == len(sorted_examples) - 1:
+                    break
+            count = end_ix - beg_ix + 1
+            if count > 1:
+                # Shuffle this subsequence
+                sub = sorted_examples[beg_ix:end_ix+1]
+                np.random.shuffle(sub)
+                sorted_examples[beg_ix:end_ix+1] = sub
+            beg_ix = end_ix + 1
+        max_cont = self._get_max_contiguous_same_label(sorted_examples)
+        logger.info("Max contiguous examples with same label: %d" % (max_cont))
         
+        # Done
+        print("Dataset ready. Size: %d" % len(self))
+
+            
+    def _get_max_contiguous_same_label(examples):
+        # Check max number of contiguous examples with same label
+        cur_count = 0
+        max_count = 0
+        cur_label = None
+        for (text, label, lang_id) in examples:
+            if label == cur_label:
+                cur_count += 1
+            else:
+                if cur_count > max_count:
+                    max_count = cur_count
+                cur_count = 0
+                cur_label = label
+        return max_count
+
+
     def _compute_sampling_probs_for_subgroup(self, lang_list, lang2freq, alpha):
         counts = np.array([lang2freq[k] for k in lang_list], dtype=np.float)
         probs = counts / counts.sum()
