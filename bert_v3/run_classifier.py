@@ -11,10 +11,10 @@ from transformers import BertForMaskedLM, BertConfig
 from transformers import AdamW
 from tqdm import tqdm, trange
 from CharTokenizer import CharTokenizer
-from BertDataset import BertDatasetForClassification, BertDatasetForMLM, BertDatasetForTesting, NO_MASK_LABEL
+from BertDataset import BertDatasetForClassification, BertDatasetForTesting
 from Pooler import Pooler
 from Classifier import Classifier
-from utils import check_for_unk_train_data, adjust_loss, weighted_avg, count_params, accuracy, get_dataloader, get_module
+from utils import adjust_loss, weighted_avg, count_params, accuracy, get_dataloader, get_module
 sys.path.append("..")
 from comp_utils import ALL_LANGS
 from scorer import compute_fscores
@@ -102,7 +102,7 @@ def predict(model, pooler, classifier, eval_dataset, args):
     return scores_tensor
 
 
-def train(model, pooler, classifier, optimizer, train_dataset, args, checkpoint_data, dev_dataset=None, unk_dataset=None):
+def train(model, pooler, classifier, optimizer, train_dataset, args, checkpoint_data, dev_dataset=None):
     """ Train model. 
 
     Args:
@@ -113,9 +113,7 @@ def train(model, pooler, classifier, optimizer, train_dataset, args, checkpoint_
     - train_dataset: BertDatasetForClassification
     - args
     - checkpoint_data: dict
-    - unk_dataset: (optional) BertDatasetForMLM for dev data (required if eval_during_training
-    - unk_dataset: (optional) BertDatasetForMLM for unlabeled data
-
+    - dev_dataset
 
     Returns: None
 
@@ -124,15 +122,9 @@ def train(model, pooler, classifier, optimizer, train_dataset, args, checkpoint_
     if args.eval_during_training:
         assert dev_dataset is not None
         assert type(dev_dataset) == BertDatasetForTesting
-    if unk_dataset is not None:
-        assert type(unk_dataset) == BertDatasetForMLM
             
     # Write header in log
     header = "GlobalStep\tLossLangID\tAccuracyLangID"
-    if not args.no_mlm:
-        header += "\tLossMLM\tAccuracyMLM"
-    if unk_dataset is not None:
-        header += "\tLossUnkMLM\tAccuracyUnkMLM"
     header += "\tGradNorm\tWeightNorm"
     if args.eval_during_training:
         header += "\tDevLoss\tDevF1Track1\tDevF1Track2\tDevF1Track3"
@@ -144,9 +136,6 @@ def train(model, pooler, classifier, optimizer, train_dataset, args, checkpoint_
     # iterable (with no end and no __len__) that we call with iter().
     train_dataloader = get_dataloader(train_dataset, args.train_batch_size, args.local_rank)
     train_batch_sampler = iter(train_dataloader)     
-    if unk_dataset is not None:
-        unk_dataloader = get_dataloader(unk_dataset, args.train_batch_size, args.local_rank)
-        unk_batch_enum = enumerate(iter(unk_dataloader))
 
     # Evaluate model on dev set
     if args.eval_during_training:
@@ -154,12 +143,7 @@ def train(model, pooler, classifier, optimizer, train_dataset, args, checkpoint_
         dev_scores = evaluate(model, pooler, classifier, dev_dataset, args)            
         log_data = []
         log_data.append(str(checkpoint_data["global_step"]))
-        log_data += ["", ""]
-        if not args.no_mlm:
-            log_data += ["", ""]            
-        if unk_dataset is not None:
-            log_data += ["", ""]
-        log_data += ["", ""]                                    
+        log_data += ["", "", "", ""]
         log_data.append("{:.5f}".format(dev_scores["loss"]))
         log_data.append("{:.5f}".format(dev_scores["track1"]))
         log_data.append("{:.5f}".format(dev_scores["track2"]))
@@ -183,10 +167,6 @@ def train(model, pooler, classifier, optimizer, train_dataset, args, checkpoint_
         real_batch_sizes = []
         lid_losses = []
         lid_accs = []
-        mlm_losses = []
-        mlm_accs = []
-        unk_mlm_losses = []
-        unk_mlm_accs = []
         grad_norms = []
         
         # Run training for one epoch
@@ -212,45 +192,10 @@ def train(model, pooler, classifier, optimizer, train_dataset, args, checkpoint_
             lid_encodings = pooler(lid_last_hidden_states)
             lid_scores = classifier(lid_encodings)
 
-            if not args.no_mlm:
-                # Call BERT encoder to get encoding of masked input sequences
-                mlm_outputs = model.bert(input_ids=masked_input_ids,
-                                         attention_mask=input_mask,
-                                         token_type_ids=segment_ids,
-                                         position_ids=None)
-                mlm_last_hidden_states = mlm_outputs[0]
-
-                # Do MLM on last hidden states
-                mlm_pred_scores = model.cls(mlm_last_hidden_states)
-
-            # Do MLM on unk_dataset if present
-            if unk_dataset is not None:
-                unk_batch_id, unk_batch = next(unk_batch_enum)
-                # Make sure the training steps are synced
-                assert unk_batch_id == step
-                unk_batch = tuple(t.to(args.device) for t in unk_batch)
-                xinput_ids, xinput_mask, xsegment_ids, xlm_label_ids = unk_batch
-                # Make sure the batch sizes are equal
-                assert len(xinput_ids) == len(input_ids)
-                unk_mlm_outputs = model.bert(input_ids=xinput_ids,
-                                             attention_mask=xinput_mask,
-                                             token_type_ids=xsegment_ids,
-                                             position_ids=None)
-                unk_last_hidden_states = unk_mlm_outputs[0]
-                unk_mlm_pred_scores = model.cls(unk_last_hidden_states)
-
             # Compute loss, do backprop. Compute accuracies.
             loss_fct = CrossEntropyLoss(reduction="mean")
             loss = loss_fct(lid_scores, label_ids)
             lid_losses.append(loss.item())
-            if not args.no_mlm:
-                mlm_loss = loss_fct(mlm_pred_scores.view(-1, model.config.vocab_size), lm_label_ids.view(-1))
-                mlm_losses.append(mlm_loss.item())
-                loss = loss + mlm_loss
-            if unk_dataset is not None:
-                unk_mlm_loss = loss_fct(unk_mlm_pred_scores.view(-1, model.config.vocab_size), xlm_label_ids.view(-1))
-                loss = loss + unk_mlm_loss
-                unk_mlm_losses.append(unk_mlm_loss.item())
 
             # Backprop
             loss = adjust_loss(loss, args)
@@ -266,12 +211,6 @@ def train(model, pooler, classifier, optimizer, train_dataset, args, checkpoint_
             # Compute accuracies
             lid_acc = accuracy(lid_scores, label_ids)
             lid_accs.append(lid_acc)
-            if not args.no_mlm:
-                mlm_acc = accuracy(mlm_pred_scores.view(-1, model.config.vocab_size), lm_label_ids.view(-1), ignore_label=NO_MASK_LABEL)
-                mlm_accs.append(mlm_acc)
-            if unk_dataset is not None:
-                unk_mlm_acc = accuracy(unk_mlm_pred_scores.view(-1, model.config.vocab_size), xlm_label_ids.view(-1), ignore_label=NO_MASK_LABEL)
-                unk_mlm_accs.append(unk_mlm_acc)
 
             # Check if we accumulate grad or do an optimization step
             if (step + 1) % args.grad_accum_steps == 0:
@@ -285,12 +224,6 @@ def train(model, pooler, classifier, optimizer, train_dataset, args, checkpoint_
         last_grad_norm = grad_norms[-1]
         avg_lid_loss = weighted_avg(lid_losses, real_batch_sizes)
         avg_lid_acc = weighted_avg(lid_accs, real_batch_sizes)
-        if not args.no_mlm:
-            avg_mlm_loss = weighted_avg(mlm_losses, real_batch_sizes)        
-            avg_mlm_acc = weighted_avg(mlm_accs, real_batch_sizes)
-        if unk_dataset is not None:
-            avg_unk_mlm_loss = weighted_avg(unk_mlm_losses, real_batch_sizes)
-            avg_unk_mlm_acc = weighted_avg(unk_mlm_accs, real_batch_sizes)
 
         # Compute norm of model weights
         weight_norm = 0
@@ -306,12 +239,6 @@ def train(model, pooler, classifier, optimizer, train_dataset, args, checkpoint_
         log_data.append(str(checkpoint_data["global_step"]))
         log_data.append("{:.5f}".format(avg_lid_loss))
         log_data.append("{:.5f}".format(avg_lid_acc))
-        if not args.no_mlm:
-            log_data.append("{:.5f}".format(avg_mlm_loss))
-            log_data.append("{:.5f}".format(avg_mlm_acc))
-        if unk_dataset is not None:
-            log_data.append("{:.5f}".format(avg_unk_mlm_loss))
-            log_data.append("{:.5f}".format(avg_unk_mlm_acc))
         log_data.append("{:.5f}".format(last_grad_norm))
         log_data.append("{:.5f}".format(weight_norm))
         if args.eval_during_training:
@@ -362,9 +289,12 @@ def main():
                         help="Path of 2-column TSV file containing labeled validation examples.")
     parser.add_argument("--path_test",
                         type=str,
-                        required=False,
                         help="Path of text file containing unlabeled test examples.")
+
     # Execution modes
+    parser.add_argument("--resume",
+                        action="store_true",
+                        help="Resume training model in --dir_pretrained_model")
     parser.add_argument("--do_train",
                         action="store_true",
                         help="Run training")
@@ -387,10 +317,7 @@ def main():
     # Hyperparameters
     parser.add_argument("--freeze_encoder",
                         action="store_true",
-                        help="Freeze weights of pre-trained encoder. (Note: in this case, we do not keep doing MLM.)")
-    parser.add_argument("--no_mlm",
-                        action="store_true",
-                        help="Do not keep doing masked language modeling (MLM) during fine-tuning.")
+                        help="Freeze weights of pre-trained encoder.")
     parser.add_argument("--avgpool",
                         action="store_true",
                         help=("Use average pooling of all last hidden states, rather than just the last hidden state of CLS, to do classification. "
@@ -411,8 +338,8 @@ def main():
                         default=64,
                         type=int,
                         help="Total batch size for evaluation.")
-    parser.add_argument("--seq_len",
-                        default=128,
+    parser.add_argument("--max_seq_len",
+                        default=256,
                         type=int,
                         help="Length of input sequences. Shorter seqs are padded, longer ones are trucated")
     parser.add_argument("--learning_rate",
@@ -452,13 +379,12 @@ def main():
     args = parser.parse_args()
     
     # Check args
-    assert args.do_train or args.do_eval or args.do_pred
+    assert args.resume or args.do_train or args.do_eval or args.do_pred
     if args.eval_during_training:
-        assert args.do_train
-    if args.do_train:
+        assert args.do_train or args.resume
+    if args.do_train or args.resume
         assert args.dir_train is not None
-        train_paths = glob.glob(os.path.join(args.dir_train, "*.train"))        
-        assert len(train_paths) > 0
+        train_paths = [os.path.join(args.dir_train, "%s.train" % lang) for lang in sorted(ALL_LANGS)]
     if args.do_train or args.do_pred:
         assert args.dir_output is not None
         if os.path.exists(args.dir_output) and os.path.isdir(args.dir_output) and len(os.listdir(args.dir_output)) > 1:
@@ -475,10 +401,11 @@ def main():
     if args.grad_accum_steps < 1:
         raise ValueError("Invalid grad_accum_steps parameter: {}, should be >= 1".format(
                             args.grad_accum_steps))
-    if args.do_train and args.freeze_encoder and not args.no_mlm:
-        logger.warning("Setting --no_mlm to True since --freeze_encoder is True, therefore doing MLM would be pointless.")
-        args.no_mlm = True
-        
+
+
+
+
+    
     # Distributed or parallel?
     if args.local_rank != -1 or args.num_gpus > 1:
         raise NotImplementedError("No distributed or parallel training available at the moment.")
@@ -489,26 +416,44 @@ def main():
         args.device = torch.device("cpu")
         args.n_gpu = 0
         
-    # Seed RNGs
-    np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
-    if args.n_gpu > 0:
-        torch.cuda.manual_seed_all(args.seed)
-
     # Load checkpoint. This contains a pre-trained model which may or
     # may not have been fine-tuned for language identification already
     logger.info("Loading checkpoint...")        
     checkpoint_path = os.path.join(args.dir_pretrained_model, "checkpoint.tar")        
     checkpoint_data = torch.load(checkpoint_path)
 
-    # Check if lang2id is in checkpoint data (which is required unless
-    # we are training)
-    if "lang2id" in checkpoint_data:
-        lang2id = checkpoint_data["lang2id"]
+    if args.resume:
+        # TODO: Check progress (what language were we training on when
+        # we stopped, and how many steps are left to do for that lang.
+        sys.exit()
+        
+        logger.info("Resuming from global step %d" % checkpoint_data["global_step"])
+        # Replace args with initial args for this job, except for num_gpus, seed and model directory
+        current_num_gpus = args.n_gpu
+        current_seed = args.seed
+        checkpoint_dir = args.dir_pretrained_model
+        args = deepcopy(checkpoint_data["initial_args"])
+        args.num_gpus = current_num_gpus
+        args.seed = current_seed
+        args.dir_pretrained_model = checkpoint_dir
+        args.output_dir = checkpoint_dir
+        args.resume = True
+        logger.info("Args (most have been reloaded from checkpoint): %s" % args)
+
+
+    
+    
+    # Seed RNGs
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    if args.n_gpu > 0:
+        torch.cuda.manual_seed_all(args.seed)
+    
+    # Get lang2id
+    if args.do_train:
+        lang2id = {x:i for i,x in enumerate(sorted(ALL_LANGS))}
     else:
-        lang2id = None
-    if not args.do_train:
-        assert lang2id is not None
+        lang2id = checkpoint_data["lang2id"]
     
     # Load tokenizer
     logger.info("Loading tokenizer...")
@@ -516,38 +461,18 @@ def main():
     with open(tokenizer_path, "rb") as f:
         tokenizer = pickle.load(f)
 
+        
     # Get data
-    max_seq_length = args.seq_len + 2 # We add 2 for CLS and SEP
     if args.do_train:
-        # Remove unk.train if present, and create a MLM dataset for it.
-        path_unk = check_for_unk_train_data(train_paths)
-        if path_unk is None:
-            unk_dataset = None
-        else:
-            train_paths.remove(path_unk)
-            logger.info("Loading MLM-only data from %s..." % path_unk)            
-            unk_dataset = BertDatasetForMLM([path_unk],
-                                            tokenizer,
-                                            max_seq_length,
-                                            sampling_alpha=args.sampling_alpha,
-                                            weight_relevant=args.weight_relevant,
-                                            encoding="utf-8",
-                                            seed=args.seed,
-                                            verbose=DEBUG)
-
-        logger.info("Loading training data from %s training files in %s..." % (len(train_paths),args.dir_train))
+        logger.info("Loading training data from %s training files in %s..." % (len(train_paths), args.dir_train))
         train_dataset = BertDatasetForClassification(train_paths,
                                                      tokenizer,
-                                                     max_seq_length,
-                                                     include_mlm=True,
+                                                     args.max_seq_len,
                                                      sampling_alpha=args.sampling_alpha,
                                                      weight_relevant=args.weight_relevant,
                                                      encoding="utf-8",
                                                      seed=args.seed,
                                                      verbose=DEBUG)
-        if path_unk is not None:
-            assert len(unk_dataset) == len(train_dataset)
-        lang2id = train_dataset.lang2id
         # Check lang2id: keys should contain all langs, and nothing else
         assert all(k in lang2id for k in ALL_LANGS)
         for k in lang2id:
@@ -561,7 +486,7 @@ def main():
         dev_dataset = BertDatasetForTesting(args.path_dev,
                                             tokenizer,
                                             lang2id,
-                                            max_seq_length,
+                                            args.max_seq_len,
                                             require_labels=True,
                                             encoding="utf-8",
                                             verbose=DEBUG)
@@ -570,7 +495,7 @@ def main():
         test_dataset = BertDatasetForTesting(args.path_test,
                                              tokenizer,
                                              lang2id,
-                                             max_seq_length,
+                                             args.max_seq_len,
                                              require_labels=False,
                                              encoding="utf-8",
                                              verbose=DEBUG)
@@ -650,7 +575,6 @@ def main():
         logger.info("  Max training steps: %d" % args.max_train_steps)
         logger.info("  Gradient accumulation steps: %d" % args.grad_accum_steps)
         logger.info("  Max optimization steps: %d" % checkpoint_data["max_opt_steps"])
-        logger.info("  Training dataset size: %d" % len(train_dataset))
         logger.info("  Batch size: %d" % args.train_batch_size)
         logger.info("  # training steps/epoch: %d" % (args.num_train_steps_per_epoch))            
         logger.info("  # optimization steps/epoch: %d" % num_opt_steps_per_epoch)
@@ -680,8 +604,7 @@ def main():
               train_dataset,
               args,
               checkpoint_data,
-              dev_dataset=dev_dataset,
-              unk_dataset=unk_dataset)
+              dev_dataset=dev_dataset)
         # Reload model
         checkpoint_data = torch.load(os.path.join(args.dir_output, "checkpoint.tar"))
         model.load_state_dict(checkpoint_data["model_state_dict"])
