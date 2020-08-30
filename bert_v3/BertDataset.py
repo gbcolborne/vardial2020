@@ -100,7 +100,7 @@ class BertDatasetForPretraining(IterableDataset):
         assert sampling_alpha >= 0.0 and sampling_alpha <= 1.0
         self.tokenizer = tokenizer
         self.vocab = tokenizer.vocab
-        self.seq_len = seq_len # Includes CLS and SEP tokens
+        self.seq_len = seq_len # Includes CLS token
         self.sampling_alpha = sampling_alpha
         self.weight_relevant = weight_relevant   # Sampling weight of relevant examples wrt irrelevant examples
         self.encoding = encoding
@@ -322,7 +322,7 @@ class BertDatasetForMLM(BertDatasetForPretraining):
     def _convert_example_to_features(self, example):
         """Convert a raw sample (a sentence as tokenized strings) into a
         proper training sample for MLM only, with IDs, LM labels,
-        input_mask, CLS and SEP tokens etc.
+        input_mask, CLS token etc.
         
         :param example: InputExampleForMLM, containing sentence input as lists of tokens.
         :return: InputFeaturesForMLM, containing all inputs and labels of one sample as IDs (as used for model training)
@@ -330,14 +330,14 @@ class BertDatasetForMLM(BertDatasetForPretraining):
         """
         tokens = example.tokens
         
-        # Truncate sequence if necessary. Account for [CLS] and [SEP] by subtracting 2.
-        tokens = tokens[:self.seq_len-2]
+        # Truncate sequence if necessary. Account for [CLS] by subtracting 1.
+        tokens = tokens[:self.seq_len-1]
         
         # Mask tokens for MLM
         tokens, lm_label_ids = mask_random_tokens(tokens, self.tokenizer)
 
-        # Add CLS and SEP
-        tokens = ["[CLS]"] + tokens + ["[SEP]"]
+        # Add CLS
+        tokens = ["[CLS]"] + tokens 
         lm_label_ids = [NO_MASK_LABEL] + lm_label_ids + [NO_MASK_LABEL]
         
         # Get input token IDs (unpadded)
@@ -481,7 +481,7 @@ class BertDatasetForSPCAndMLM(BertDatasetForPretraining):
         """Convert a raw sample (a sentence as tokenized strings) into a
         proper training sample for both MLM and SPC, with IDs, LM labels,
         input_mask, candidate labels for sentence pair classification, CLS
-        and SEP tokens, etc.
+        token, etc.
 
         :param example: InputExampleForSPCAndMLM, containing sentence inputs as lists of tokens.
 
@@ -492,18 +492,18 @@ class BertDatasetForSPCAndMLM(BertDatasetForPretraining):
         tokens_pos = example.tokens_pos
         tokens_neg = example.tokens_neg
     
-        # Truncate sequence if necessary. Account for [CLS] and [SEP] by subtracting 2.
-        tokens_query = tokens_query[:self.seq_len-2]
-        tokens_pos = tokens_pos[:self.seq_len-2]
-        tokens_neg = tokens_neg[:self.seq_len-2]    
+        # Truncate sequence if necessary. Account for [CLS] by subtracting 1.
+        tokens_query = tokens_query[:self.seq_len-1]
+        tokens_pos = tokens_pos[:self.seq_len-1]
+        tokens_neg = tokens_neg[:self.seq_len-1]    
     
         # Mask tokens for MLM
         tokens_query, lm_label_ids_query = mask_random_tokens(tokens_query, self.tokenizer)
 
-        # Add CLS and SEP
-        tokens_query = ["[CLS]"] + tokens_query + ["[SEP]"]
-        tokens_pos = ["[CLS]"] + tokens_pos + ["[SEP]"]
-        tokens_neg = ["[CLS]"] + tokens_neg + ["[SEP]"]
+        # Add CLS
+        tokens_query = ["[CLS]"] + tokens_query 
+        tokens_pos = ["[CLS]"] + tokens_pos 
+        tokens_neg = ["[CLS]"] + tokens_neg 
         lm_label_ids_query = [NO_MASK_LABEL] + lm_label_ids_query + [NO_MASK_LABEL]
 
         # Get input token IDs (unpadded)
@@ -609,7 +609,7 @@ class InputFeaturesForClassification(object):
         self.segment_ids = segment_ids # List containing token type (segment) IDs
         self.label_id = label_id # Label id (1 or 0)
         self.lang_id = lang_id # Lang id (should be target lang if label id is 1)
-        self.seq_len # Real sequence length of input tokens (excluding padding and special tokens CLS and SEP).
+        self.seq_len # Real sequence length of input tokens (excluding padding and special token CLS).
         
     
 class BertDatasetForClassification(Dataset):
@@ -629,7 +629,7 @@ class BertDatasetForClassification(Dataset):
         assert sampling_alpha >= 0 and sampling_alpha <= 1
         self.target_lang = target_lang
         self.tokenizer = tokenizer
-        self.max_seq_len = max_seq_len
+        self.max_seq_len = max_seq_len # Includes CLS token
         self.verbose = verbose
         self.sorted_examples = []
         self.sample_counter = 0
@@ -804,8 +804,8 @@ class BertDatasetForClassification(Dataset):
         # Store original sequence length
         seq_len = len(tokens)
         
-        # Truncate sequence if necessary. Account for [CLS] and [SEP] by subtracting 2.
-        tokens = tokens[:self.max_seq_len-2]
+        # Truncate sequence if necessary. Account for [CLS] by subtracting 1.
+        tokens = tokens[:self.max_seq_len-1]
 
         # Add CLS
         tokens = ["[CLS]"] + tokens
@@ -860,7 +860,7 @@ class BertDatasetForTesting(Dataset):
         - path_data: path of a file in TSV format, with one or 2 columns, containing texts and optional labels.
         - tokenizer:
         - label2id: dict that maps labels2ids
-        - seq_len: maximum sequence length (including CLS and SEP)
+        - seq_len: maximum sequence length (including CLS)
 
         """
         super(BertDatasetForTesting).__init__()
@@ -931,11 +931,11 @@ class BertDatasetForTesting(Dataset):
         tokens = example.tokens
         label = example.label
         
-        # Truncate sequence if necessary. Account for [CLS] and [SEP] by subtracting 2.
-        tokens = tokens[:self.seq_len-2]
+        # Truncate sequence if necessary. Account for [CLS] by subtracting 1.
+        tokens = tokens[:self.seq_len-1]
 
-        # Add CLS and SEP
-        tokens = ["[CLS]"] + tokens + ["[SEP]"]
+        # Add CLS
+        tokens = ["[CLS]"] + tokens
         
         # Get input token IDs (unpadded)
         input_ids = self.tokenizer.convert_tokens_to_ids(tokens)
