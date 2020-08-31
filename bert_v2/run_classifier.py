@@ -172,10 +172,7 @@ def train(model, pooler, classifier, optimizer, train_dataset, args, checkpoint_
     if args.eval_during_training:
         best_score = -1
     for epoch in trange(int(args.num_epochs), desc="Epoch"):
-        if args.freeze_encoder:
-            model.eval()
-        else:
-            model.train()
+        model.train()
         pooler.train()
         classifier.train()
                   
@@ -585,7 +582,10 @@ def main():
     model = BertForMaskedLM(config)
     model.load_state_dict(checkpoint_data["model_state_dict"])
     model.to(args.device)
-        
+    if args.freeze_encoder:
+        for p in model.parameters():
+            p.requires_grad = False
+            
     # Create pooler and classifier, load pretrained weights if present
     if "pooler_state_dict" in checkpoint_data:
         logger.info("Loading pooler...")
@@ -626,9 +626,7 @@ def main():
         num_opt_steps_per_epoch = args.num_train_steps_per_epoch // args.grad_accum_steps
         args.num_epochs = math.ceil(checkpoint_data["max_opt_steps"] / num_opt_steps_per_epoch)
         logger.info("Preparing optimizer...")
-        np_list = []
-        if not args.freeze_encoder:
-            np_list += list(model.named_parameters())
+        np_list = list(model.named_parameters())
         np_list += list(pooler.named_parameters())
         np_list += list(classifier.named_parameters())        
         no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
