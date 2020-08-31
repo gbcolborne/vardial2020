@@ -108,32 +108,49 @@ def train(model, optimizer, tokenizer, target_lang, args, checkpoint_data, dev_d
         assert dev_dataset is not None
         assert type(dev_dataset) == BertDatasetForTesting
     target_lang_id = model.lang2id[target_lang]
-        
-    # Make dataset
-    logger.info("Loading training data from %s training files in %s..." % (target_lang, args.dir_train))
-    train_dataset = BertDatasetForClassification(args.dir_data,
-                                                 target_lang,
-                                                 tokenizer,
-                                                 args.max_seq_len,
-                                                 sampling_alpha=args.sampling_alpha,
-                                                 weight_relevant=args.weight_relevant,
-                                                 encoding="utf-8",
-                                                 seed=args.seed,
-                                                 verbose=DEBUG)
-        
-    # Make dataloader(s). 
+
+    # Where do we save stuff?
+    save_to_dir = args.dir_pretrained_model if args.resume else args.dir_output
+    
+    # Make or load dataset
+    path_data = os.path.join(save_to_dir, "train-set-%s.pkl" % target_lang)
+    if args.resume:
+        logger.info("Reloading training set for '%s' from %s" % (target_lang, path_data))
+        with open(path_data, "rb") as f:
+            train_dataset = pickle.load(f)
+        logger.info("Dataset size: %d" % len(train_dataset))            
+    else:
+        logger.info("Making training set for '%s' using data in %s..." % (target_lang, args.dir_data))
+        train_dataset = BertDatasetForClassification(args.dir_data,
+                                                     target_lang,
+                                                     tokenizer,
+                                                     args.max_seq_len,
+                                                     sampling_alpha=args.sampling_alpha,
+                                                     weight_relevant=args.weight_relevant,
+                                                     encoding="utf-8",
+                                                     seed=args.seed,
+                                                     verbose=DEBUG)
+        logger.info("Saving training set at %s" % path_data)        
+        with open(path_data, "wb") as f:
+            pickle.save(train_dataset, f)
+
+    # Make dataloader
     train_dataloader = get_dataloader(train_dataset, args.train_batch_size, args.local_rank)
 
+    # Prepare log
+    train_log_path = os.path.join(save_to_dir, "train-%s.log" % target_lang)
+
     # Write header in log
-    header = "GlobalStep\tLossLangID\tAccuracyLangID"
-    header += "\tGradNorm\tWeightNorm"
-    if args.eval_during_training:
-        header += "\tDevLoss\tDevF1Track1\tDevF1Track2\tDevF1Track3"
-    with open(args.train_log_path, "w") as f:
-        f.write(header + "\n")
+    if not args.resume:
+        header = "GlobalStep\tLossLangID\tAccuracyLangID"
+        header += "\tGradNorm\tWeightNorm"
+        if args.eval_during_training:
+            header += "\tDevLoss\tDevF1Track1\tDevF1Track2\tDevF1Track3"
+        with open(train_log_path, "w") as f:
+            f.write(header + "\n")
             
-    # Evaluate model on dev set
-    if args.eval_during_training:
+    # Evaluate model on dev set before training
+    if (not args.resume) and args.eval_during_training:
         logger.info("Evaluating model on dev set before we start training...")
         dev_scores = evaluate(model, dev_dataset, args)            
         log_data = []
@@ -143,7 +160,7 @@ def train(model, optimizer, tokenizer, target_lang, args, checkpoint_data, dev_d
         log_data.append("{:.5f}".format(dev_scores["track1"]))
         log_data.append("{:.5f}".format(dev_scores["track2"]))
         log_data.append("{:.5f}".format(dev_scores["track3"]))                            
-        with open(args.train_log_path, "a") as f:
+        with open(train_log_path, "a") as f:
             f.write("\t".join(log_data)+"\n")
         
     # Start training
@@ -227,7 +244,7 @@ def train(model, optimizer, tokenizer, target_lang, args, checkpoint_data, dev_d
             log_data.append("{:.5f}".format(dev_scores["track1"]))
             log_data.append("{:.5f}".format(dev_scores["track2"]))
             log_data.append("{:.5f}".format(dev_scores["track3"]))                            
-        with open(args.train_log_path, "a") as f:
+        with open(train_log_path, "a") as f:
             f.write("\t".join(log_data)+"\n")
 
         # Save checkpoint
@@ -242,9 +259,16 @@ def train(model, optimizer, tokenizer, target_lang, args, checkpoint_data, dev_d
             model_to_save = get_module(model)
             checkpoint_data['model_state_dict'] = model_to_save.state_dict()
             checkpoint_data['optimizer_state_dict'] = optimizer.state_dict()
-            checkpoint_path = os.path.join(args.dir_output, "checkpoint.tar")
+            checkpoint_path = os.path.join(save_to_dir, "checkpoint.tar")
             torch.save(checkpoint_data, checkpoint_path)            
+    logger.info("Done training classifier for %s" % target_lang)
 
+    # Clean up
+    logger.info("Deleting %s" % path_data)
+    cmd = ["rm", path_data]
+    subprocess.call(cmd)
+
+    return None
         
 def main():
     parser = argparse.ArgumentParser()
@@ -260,7 +284,7 @@ def main():
                         help=("Dir containing training data (n files named <lang>.train containing unlabeled text)"))
     parser.add_argument("--dir_output",
                         type=str,
-                        help="Directory in which model will be written (required if --do_train or --do_pred)")
+                        help="Directory in which model will be written (required if --do_train (but not --resume) or --do_pred)")
     parser.add_argument("--path_dev",
                         type=str,
                         help="Path of 2-column TSV file containing labeled validation examples.")
@@ -271,7 +295,7 @@ def main():
     # Execution modes
     parser.add_argument("--resume",
                         action="store_true",
-                        help="Resume training model in --dir_pretrained_model")
+                        help="Resume training model in --dir_pretrained_model (note: --dir_output will be ignored unless you also --do_pred and the resumed training job terminates)")
     parser.add_argument("--do_train",
                         action="store_true",
                         help="Run training")
@@ -328,14 +352,10 @@ def main():
     parser.add_argument("--correct_bias",
                         action='store_true',
                         help="Correct bias in AdamW optimizer (correct_bias=False is meant to reproduce BERT behaviour exactly.")
-    parser.add_argument("--max_train_steps",
-                        default=1000000,
+    parser.add_argument("--num_train_epochs"
+                        default=3,
                         type=int,
-                        help="Maximum number of training steps to perform. Note: # optimization steps = # train steps / # accumulation steps.")
-    parser.add_argument("--num_train_steps_per_epoch",
-                        default=1000,
-                        type=int,
-                        help="Number of training steps that equals one epoch. Note: # optimization steps = # train steps / # accumulation steps.")    
+                        help="Number of training epochs.")
     parser.add_argument('--grad_accum_steps',
                         type=int,
                         default=1,
@@ -353,30 +373,6 @@ def main():
                         default=42,
                         help="random seed for initialization")
     args = parser.parse_args()
-    
-    # Check args
-    assert args.resume or args.do_train or args.do_eval or args.do_pred
-    if args.eval_during_training:
-        assert args.do_train or args.resume
-    if args.do_train or args.resume
-        assert args.dir_train is not None
-        
-    if args.do_train or args.do_pred:
-        assert args.dir_output is not None
-        if os.path.exists(args.dir_output) and os.path.isdir(args.dir_output) and len(os.listdir(args.dir_output)) > 1:
-            msg = "%s already exists and is not empty" % args.dir_output
-            raise ValueError(msg)
-        if not os.path.exists(args.dir_output):
-            os.makedirs(args.dir_output)
-    if args.do_eval or args.eval_during_training:
-        assert args.path_dev is not None
-        assert os.path.exists(args.path_dev)
-    if args.do_pred:
-        assert args.path_test is not None
-        assert os.path.exists(args.path_test)
-    if args.grad_accum_steps < 1:
-        raise ValueError("Invalid grad_accum_steps parameter: {}, should be >= 1".format(
-                            args.grad_accum_steps))
 
     # Distributed or parallel?
     if args.local_rank != -1 or args.num_gpus > 1:
@@ -387,43 +383,67 @@ def main():
     else:
         args.device = torch.device("cpu")
         args.n_gpu = 0
+    
+    # Check execution mode
+    assert args.resume or args.do_train or args.do_eval or args.do_pred
+    if args.resume:
+        assert not args.do_train
+        assert not args.do_eval
+        assert not args.do_pred
         
     # Load checkpoint. This contains a pre-trained model which may or
     # may not have been fine-tuned for language identification already
     logger.info("Loading checkpoint...")        
     checkpoint_path = os.path.join(args.dir_pretrained_model, "checkpoint.tar")        
     checkpoint_data = torch.load(checkpoint_path)
-
     if args.resume:
-        # TODO: Check progress (what language were we training on when
-        # we stopped, and how many steps are left to do for that lang.
-        sys.exit()
-        
-        logger.info("Resuming from global step %d" % checkpoint_data["global_step"])
-        # Replace args with initial args for this job, except for num_gpus, seed and model directory
+        # Check progress: what language were we training on when
+        # we stopped?
+        logger.info("Resuming training. Currently training classifier for %s" % checkpoint_data["current_lang"])
+        # Replace args with initial args for this job, except for
+        # num_gpus, seed and model directory
         current_num_gpus = args.n_gpu
-        current_seed = args.seed
-        checkpoint_dir = args.dir_pretrained_model
+        current_dir_pretrained_model = args.dir_pretrained_model
         args = deepcopy(checkpoint_data["initial_args"])
         args.num_gpus = current_num_gpus
-        args.seed = current_seed
-        args.dir_pretrained_model = checkpoint_dir
-        args.output_dir = checkpoint_dir
+        args.dir_pretrained_model = dir_pretrained_model
         args.resume = True
         logger.info("Args (most have been reloaded from checkpoint): %s" % args)
+    else:
+        if args.eval_during_training:
+            assert args.do_train
+        if args.do_train or args.do_pred:
+            assert args.dir_output is not None
+            if os.path.exists(args.dir_output) and os.path.isdir(args.dir_output) and len(os.listdir(args.dir_output)) > 1:
+                msg = "%s already exists and is not empty" % args.dir_output
+                raise ValueError(msg)
+            if not os.path.exists(args.dir_output):
+                os.makedirs(args.dir_output)
+        if args.do_train:
+            assert args.dir_train is not None
+            checkpoint_data["initial_args"] = args
 
+    if args.do_eval or args.eval_during_training:
+        assert args.path_dev is not None
+        assert os.path.exists(args.path_dev)
+    if args.do_pred:
+        assert args.path_test is not None
+        assert os.path.exists(args.path_test)
+    if args.grad_accum_steps < 1:
+        raise ValueError("Invalid grad_accum_steps parameter: {}, should be >= 1".format(
+                            args.grad_accum_steps))
 
     
+    # Create list of languages we handle
+    lang_list = sorted(ALL_LANGS)
+        
     
     # Seed RNGs
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     if args.n_gpu > 0:
         torch.cuda.manual_seed_all(args.seed)
-    
-    # Create list of languages we handle
-    lang_list = sorted(ALL_LANGS)
-    
+
     # Load tokenizer
     logger.info("Loading tokenizer...")
     tokenizer_path = os.path.join(args.dir_pretrained_model, "tokenizer.pkl")
@@ -458,8 +478,9 @@ def main():
         logger.info("Nb params in adapters: %d" % count_params(model.adapter))
     logger.info("Nb params in classifier: %d" % count_params(model.classifier))
         
-        
+
     # Get data
+    dev_dataset = None
     if args.do_eval or args.eval_during_training:
         logger.info("Loading validation data from %s..." % args.path_dev)                                
         dev_dataset = BertDatasetForTesting(args.path_dev,
@@ -479,65 +500,74 @@ def main():
                                              encoding="utf-8",
                                              verbose=DEBUG)
 
-    # Training
-    if args.do_train:
-        # Prepare optimizer
-        checkpoint_data["global_step"] = 0
-        checkpoint_data["max_opt_steps"] = args.max_train_steps // args.grad_accum_steps
-        num_opt_steps_per_epoch = args.num_train_steps_per_epoch // args.grad_accum_steps
-        args.num_epochs = math.ceil(checkpoint_data["max_opt_steps"] / num_opt_steps_per_epoch)
-        logger.info("Preparing optimizer...")
-        np_list = list(model.named_parameters())
-        no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
-        opt_params = [
-            {'params': [p for n, p in np_list if not any(nd in n for nd in no_decay)], 'weight_decay': 0.01},
-            {'params': [p for n, p in np_list if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
-        ]
-        if args.equal_betas:
-            betas = (0.9, 0.9)
-        else:
-            betas = (0.9, 0.999)
-        optimizer = AdamW(opt_params,
-                          lr=args.learning_rate,
-                          betas=betas,
-                          correct_bias=args.correct_bias) # To reproduce BertAdam specific behaviour, use correct_bias=False
-
-        # Log some info before training
-        logger.info("*** Training info: ***")
-        logger.info("  Max training steps: %d" % args.max_train_steps)
-        logger.info("  Gradient accumulation steps: %d" % args.grad_accum_steps)
-        logger.info("  Max optimization steps: %d" % checkpoint_data["max_opt_steps"])
-        logger.info("  Batch size: %d" % args.train_batch_size)
-        logger.info("  # training steps/epoch: %d" % (args.num_train_steps_per_epoch))            
-        logger.info("  # optimization steps/epoch: %d" % num_opt_steps_per_epoch)
-        logger.info("  # epochs to do: %d" % args.num_epochs)
-        if args.eval_during_training:
-            logger.info("Validation dataset size: %d" % len(dev_dataset))
-
-        # Write config and tokenizer in output directory
+    # Write config and tokenizer in output directory
+    if (not args.resume) and args.do_train:
         path_config = os.path.join(args.dir_output, "config.json")
         model.config.to_json_file(path_config)
         path_tokenizer = os.path.join(args.dir_output, "tokenizer.pkl")
         with open(path_tokenizer, "wb") as f:
             pickle.dump(tokenizer, f)
             
-        # Prepare path of training log
-        time_str = datetime.now().strftime("%Y%m%d%H%M%S")
-        train_log_path = os.path.join(args.dir_output, "%s.train.log" % time_str)        
-        args.train_log_path = train_log_path
+    # Train
+    if args.do_train or args.resume:
+        # Check which languages are left to process
+        langs_left = lang_list[:]
+        if args.resume:
+            start = langs_left.index(checkpoint_data["cur_lang"])
+            langs_left = langs_left[start:]
+            logger.info("Resuming training of classifier for '%s' (%d/%d)" % (target_lang,
+                                                                              start+1,
+                                                                              len(lang_list)))
+        else:
+            logger.info("Starting training of %d classifiers" % len(langs_left))            
+            checkpoint_data["global_step"] = 0
 
-        # Run training
-        if not args.eval_during_training:
-            dev_dataset = None
-        train(model,
-              optimizer,
-              tokenizer,
-              target_lang,
-              args,
-              checkpoint_data,
-              dev_dataset=dev_dataset)
-        # Reload model
-        checkpoint_data = torch.load(os.path.join(args.dir_output, "checkpoint.tar"))
+        # Log some info before training
+        logger.info("*** Training info: ***")
+        logger.info("  Num epochs: %d" % args.num_train_epochs)
+        logger.info("  Gradient accumulation steps: %d" % args.grad_accum_steps)
+        logger.info("  Batch size: %d" % args.train_batch_size)
+        if args.eval_during_training:
+            logger.info("  Validation dataset size: %d" % len(dev_dataset))
+
+        # Loop over the languages we haven't processed yet.
+        for target_lang in langs_left:
+            logger.info("Preparing to train classifier for '%s'" % target_lang)
+
+            # Prepare optimizer
+            logger.info("  Preparing optimizer")
+            np_list = list(model.named_parameters())
+            no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
+            opt_params = [
+                {'params': [p for n, p in np_list if not any(nd in n for nd in no_decay)], 'weight_decay': 0.01},
+                {'params': [p for n, p in np_list if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
+            ]
+            if args.equal_betas:
+                betas = (0.9, 0.9)
+            else:
+                betas = (0.9, 0.999)
+                optimizer = AdamW(opt_params,
+                                  lr=args.learning_rate,
+                                  betas=betas,
+                                  correct_bias=args.correct_bias) # To reproduce BertAdam specific behaviour, use correct_bias=False
+                
+            # Load optimizer state if resuming
+            if args.resume:
+                optmizer.load_state_dict(checkpoint_data["optimizer_state_dict"])
+        
+            # Run training on current target language
+            train(model,
+                  optimizer,
+                  tokenizer,
+                  target_lang,
+                  args,
+                  checkpoint_data,
+                  dev_dataset=dev_dataset)
+        logger.info("Finised training %d classifiers" % len(lang_list))
+        
+        # Reload model after training all classifiers
+        save_to_dir = args.dir_pretrained_model if args.resume else args.dir_output
+        checkpoint_data = torch.load(os.path.join(save_to_dir, "checkpoint.tar"))
         model.load_state_dict(checkpoint_data["model_state_dict"])
         
     # Evaluate model on dev set
