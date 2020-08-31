@@ -22,6 +22,9 @@ def get_dataloader(dataset, batch_size, local_rank):
         else:
             sampler = DistributedSampler(dataset, shuffle=false)
         return DataLoader(dataset, sampler=sampler, batch_size=batch_size)
+    elif isinstance(dataset, BertDatasetForClassification):
+        sampler = SequentialSampler(dataset)
+        return DataLoader(dataset, sampler=sampler, batch_size=batch_size)
     else:
         # BertDatasetForTraining is an IterableDataset, so we don't use a sampler
         return DataLoader(dataset, batch_size=batch_size)
