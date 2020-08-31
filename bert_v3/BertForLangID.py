@@ -14,7 +14,7 @@ class Classifier(nn.Module):
           (nb classes, batch size, hidden dim) if we have
           class-specific encodings; in this case, we do a batch
           multiply of the class-specific encodings and each of the
-          classe specific output layers (each with a single output
+          class-specific output layers (each with a single output
           unit).
         - cls: (optional) integer ID of output unit we are training
           (to get all scores, leave this set to None)
@@ -24,16 +24,26 @@ class Classifier(nn.Module):
         """
         if cls:
             if len(encodings.shape) == 3:
+                # Class-specific encodings to one class-specific
+                # output unit. Input shape is (nb classes, batch
+                # size, hidden dim)
                 output = torch.bmm(encodings, self.dense.weight[:,cls].permute(1,0).unsqueeze(2)).squeeze().permute(1,0)
                 output = output + self.dense.bias[cls]
             else:
+                # Generic encodings to one class-specific output
+                # unit. Input shape is (batch size, hidden dim).
                 output = torch.matmul(encodings, self.dense.weight[:,cls].permute(1,0))
                 output = output + self.dense.bias[cls]
         else:
             if len(encodings.shape) == 3:
+                # Class-specific encodings to all class-specific
+                # output units. Input shape is (nb classes, batch
+                # size, hidden dim)
                 output = torch.bmm(encodings, self.dense.weight.unsqueeze(2)).squeeze().permute(1,0)
                 output = output + self.dense.bias
             elif len(encodings.shape) < 3:
+                # Generic encodings to all class-specific output
+                # units. Input shape is (batch size, hidden dim).
                 output = self.dense(encodings)
         return output
 
@@ -61,6 +71,10 @@ class Adapter(nn.Module):
     """Adapter layer designed to transform text encoding before passing it
     to the output layer.
 
+    Given an input representation, the adapter produces one
+    class-specific output representation for each class, of the same
+    shape as the input representation.
+
     """
     def __init__(self, hidden_dim, nb_classes):
         super().__init__()
@@ -69,13 +83,13 @@ class Adapter(nn.Module):
 
         
     def forward(self, hidden_state, cls=None):
-        """ Forward pass
+        """ Forward pass. 
 
         Params:
-        - hidden_state
+        - hidden_state: tensor of shape (batch size, hidden dim)
         - cls: (optional) integer ID of output unit we are training (to get all scores, leave this set to None)        
 
-        Returns: tensor of shape (batch size, hidden size) if cls is provided, (nb classes, batch size, hidden size) otherwise.
+        Returns: tensor of shape (batch size, hidden size) if cls is provided, otherwise (nb classes, batch size, hidden size).
 
         """
         if cls:
@@ -133,7 +147,9 @@ class BertForLangID(nn.Module):
                                position_ids=None)
         last_hidden_states = outputs[0]
         encodings = pooler(last_hidden_states)
+        # Encodings have shape (batch size, hidden dim)
         if self.adapter:
+            # If we use adapters, encodings will have shape (nb classes, batch size, hidden dim)
             encodings = self.adapter(encodings, cls=cls)
         scores = classifier(encodings, cls=cls)
         return scores
