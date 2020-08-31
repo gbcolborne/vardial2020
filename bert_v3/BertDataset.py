@@ -1,4 +1,4 @@
-s""" Dataset classes for training BERT """
+""" Dataset classes for training BERT """
 
 import sys, os, random, logging
 from io import open
