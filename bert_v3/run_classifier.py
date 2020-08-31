@@ -12,8 +12,7 @@ from transformers import AdamW
 from tqdm import tqdm, trange
 from CharTokenizer import CharTokenizer
 from BertDataset import BertDatasetForClassification, BertDatasetForTesting
-from Pooler import Pooler
-from Classifier import Classifier
+from BertForLangID import BertForLangID
 from utils import adjust_loss, weighted_avg, count_params, accuracy, get_dataloader, get_module
 sys.path.append("..")
 from comp_utils import ALL_LANGS
@@ -27,13 +26,11 @@ logging.basicConfig(format='%(asctime)s - %(levelname)s - %(name)s -   %(message
 logger = logging.getLogger(__name__)
 
 
-def evaluate(model, pooler, classifier, eval_dataset, args):
+def evaluate(model, eval_dataset, args):
     """ Evaluate model. 
 
     Args:
-    - model: BertModelForMaskedLM
-    - pooler: Pooler
-    - classifier: Classifier
+    - model: BertModelForLangID
     - eval_dataset: BertDatasetForTesting
     - args
 
@@ -41,7 +38,7 @@ def evaluate(model, pooler, classifier, eval_dataset, args):
 
     """
     # Get logits (un-normalized class scores) from model
-    logits = predict(model, pooler, classifier, eval_dataset, args)
+    logits = predict(model, eval_dataset, args)
 
     # Extract label IDs from the dataset
     gold_label_ids = [x[3] for x in eval_dataset]
@@ -63,13 +60,11 @@ def evaluate(model, pooler, classifier, eval_dataset, args):
     return scores
 
 
-def predict(model, pooler, classifier, eval_dataset, args):
+def predict(model, eval_dataset, args):
     """ Get predicted scores (un-normalized) for examples in dataset. 
 
     Args:
-    - model: BertModelForMaskedLM
-    - pooler: Pooler
-    - classifier: Classifier
+    - model: BertForLangID
     - eval_dataset: BertDatasetForTesting
     - args
 
@@ -81,8 +76,6 @@ def predict(model, pooler, classifier, eval_dataset, args):
     dataloader = get_dataloader(eval_dataset, args.eval_batch_size, args.local_rank)
     scores = []
     model.eval()
-    pooler.eval()
-    classifier.eval()
     for step, batch in enumerate(tqdm(dataloader, desc="Prediction")):
         # Unpack batch
         batch = tuple(t.to(args.device) for t in batch)
@@ -90,39 +83,47 @@ def predict(model, pooler, classifier, eval_dataset, args):
         input_mask = batch[1]
         segment_ids = batch[2]
         with torch.no_grad():
-            lid_outputs = model.bert(input_ids=input_ids,
-                                     attention_mask=input_mask,
-                                     token_type_ids=segment_ids,
-                                     position_ids=None)
-            lid_last_hidden_states = lid_outputs[0]
-            lid_encodings = pooler(lid_last_hidden_states)
-            lid_scores = classifier(lid_encodings)
+            lid_scores = model(input_ids, input_mask, segment_ids, cls=None)
         scores.append(lid_scores)
     scores_tensor = torch.cat(scores, dim=0)
     return scores_tensor
 
 
-def train(model, pooler, classifier, optimizer, train_dataset, args, checkpoint_data, dev_dataset=None):
+def train(model, optimizer, tokenizer, target_lang, args, checkpoint_data, dev_dataset=None):
     """ Train model. 
 
     Args:
-    - model: BertModelForMaskedLM
-    - pooler: Pooler
-    - classifier: Classifier
+    - model: BertModelForLangID
     - optimizer
-    - train_dataset: BertDatasetForClassification
+    - tokenizer
+    - target_lang: language on which we train
     - args
     - checkpoint_data: dict
-    - dev_dataset
+    - dev_dataset: (optional) BertDatasetForTesting
 
     Returns: None
 
     """
-    assert type(train_dataset) == BertDatasetForClassification
     if args.eval_during_training:
         assert dev_dataset is not None
         assert type(dev_dataset) == BertDatasetForTesting
-            
+    target_lang_id = model.lang2id[target_lang]
+        
+    # Make dataset
+    logger.info("Loading training data from %s training files in %s..." % (target_lang, args.dir_train))
+    train_dataset = BertDatasetForClassification(args.dir_data,
+                                                 target_lang,
+                                                 tokenizer,
+                                                 args.max_seq_len,
+                                                 sampling_alpha=args.sampling_alpha,
+                                                 weight_relevant=args.weight_relevant,
+                                                 encoding="utf-8",
+                                                 seed=args.seed,
+                                                 verbose=DEBUG)
+        
+    # Make dataloader(s). 
+    train_dataloader = get_dataloader(train_dataset, args.train_batch_size, args.local_rank)
+
     # Write header in log
     header = "GlobalStep\tLossLangID\tAccuracyLangID"
     header += "\tGradNorm\tWeightNorm"
@@ -130,17 +131,11 @@ def train(model, pooler, classifier, optimizer, train_dataset, args, checkpoint_
         header += "\tDevLoss\tDevF1Track1\tDevF1Track2\tDevF1Track3"
     with open(args.train_log_path, "w") as f:
         f.write(header + "\n")
-        
-    # Make dataloader(s). Note: since BertDatasetForTraining and its
-    # subclasses are IterableDatasets (i.e. streams), the loader is an
-    # iterable (with no end and no __len__) that we call with iter().
-    train_dataloader = get_dataloader(train_dataset, args.train_batch_size, args.local_rank)
-    train_batch_sampler = iter(train_dataloader)     
-
+            
     # Evaluate model on dev set
     if args.eval_during_training:
         logger.info("Evaluating model on dev set before we start training...")
-        dev_scores = evaluate(model, pooler, classifier, dev_dataset, args)            
+        dev_scores = evaluate(model, dev_dataset, args)            
         log_data = []
         log_data.append(str(checkpoint_data["global_step"]))
         log_data += ["", "", "", ""]
@@ -156,12 +151,7 @@ def train(model, pooler, classifier, optimizer, train_dataset, args, checkpoint_
     if args.eval_during_training:
         best_score = -1
     for epoch in trange(int(args.num_epochs), desc="Epoch"):
-        if args.freeze_encoder:
-            model.eval()
-        else:
-            model.train()
-        pooler.train()
-        classifier.train()
+        model.train()
                   
         # Some stats for this epoch
         real_batch_sizes = []
@@ -177,20 +167,11 @@ def train(model, pooler, classifier, optimizer, train_dataset, args, checkpoint_
             input_mask = batch[1]
             segment_ids = batch[2]
             label_ids = batch[3]
-            masked_input_ids = batch[4]
-            lm_label_ids = batch[5]                
+            lang_ids = batch[4]                
             real_batch_sizes.append(len(input_ids))
 
             # Call BERT encoder to get encoding of (un-masked) input sequences
-            lid_outputs = model.bert(input_ids=input_ids,
-                                     attention_mask=input_mask,
-                                     token_type_ids=segment_ids,
-                                     position_ids=None)
-            lid_last_hidden_states = lid_outputs[0]
-
-            # Do classification (i.e. language identification)
-            lid_encodings = pooler(lid_last_hidden_states)
-            lid_scores = classifier(lid_encodings)
+            lid_scores = model(input_ids, input_mask, segment_ids, cls=target_lang_id)
 
             # Compute loss, do backprop. Compute accuracies.
             loss_fct = CrossEntropyLoss(reduction="mean")
@@ -203,7 +184,7 @@ def train(model, pooler, classifier, optimizer, train_dataset, args, checkpoint_
             
             # Compute norm of gradient
             training_grad_norm = 0
-            for param in chain(model.parameters(), pooler.parameters(), classifier.parameters()):
+            for param in model.parameters()
                 if param.grad is not None:
                     training_grad_norm += torch.norm(param.grad, p=2).item()
             grad_norms.append(training_grad_norm)
@@ -227,12 +208,12 @@ def train(model, pooler, classifier, optimizer, train_dataset, args, checkpoint_
 
         # Compute norm of model weights
         weight_norm = 0
-        for param in chain(model.parameters(), pooler.parameters(), classifier.parameters()):
+        for param in model.parameters():
             weight_norm += torch.norm(param.data, p=2).item()
 
         # Evaluate model on dev set
         if args.eval_during_training:
-            dev_scores = evaluate(model, pooler, classifier, dev_dataset, args)            
+            dev_scores = evaluate(model, dev_dataset, args)            
             
         # Write stats for this epoch in log
         log_data = []
@@ -259,11 +240,7 @@ def train(model, pooler, classifier, optimizer, train_dataset, args, checkpoint_
                 save = False
         if save:
             model_to_save = get_module(model)
-            pooler_to_save = get_module(pooler)
-            classifier_to_save = get_module(classifier)
             checkpoint_data['model_state_dict'] = model_to_save.state_dict()
-            checkpoint_data['pooler_state_dict'] = pooler_to_save.state_dict()
-            checkpoint_data['classifier_state_dict'] = classifier_to_save.state_dict()        
             checkpoint_data['optimizer_state_dict'] = optimizer.state_dict()
             checkpoint_path = os.path.join(args.dir_output, "checkpoint.tar")
             torch.save(checkpoint_data, checkpoint_path)            
@@ -318,10 +295,9 @@ def main():
     parser.add_argument("--freeze_encoder",
                         action="store_true",
                         help="Freeze weights of pre-trained encoder.")
-    parser.add_argument("--avgpool",
+    parser.add_argument("--add_adapters",
                         action="store_true",
-                        help=("Use average pooling of all last hidden states, rather than just the last hidden state of CLS, to do classification. "
-                              "Note that in either case, the pooled vector passes through a square linear layer and a tanh before the classification layer."))
+                        help="Add adapter layers between text encoding and classification layers.")
     parser.add_argument("--sampling_alpha",
                         type=float,
                         default=1.0,
@@ -384,7 +360,7 @@ def main():
         assert args.do_train or args.resume
     if args.do_train or args.resume
         assert args.dir_train is not None
-        train_paths = [os.path.join(args.dir_train, "%s.train" % lang) for lang in sorted(ALL_LANGS)]
+        
     if args.do_train or args.do_pred:
         assert args.dir_output is not None
         if os.path.exists(args.dir_output) and os.path.isdir(args.dir_output) and len(os.listdir(args.dir_output)) > 1:
@@ -402,10 +378,6 @@ def main():
         raise ValueError("Invalid grad_accum_steps parameter: {}, should be >= 1".format(
                             args.grad_accum_steps))
 
-
-
-
-    
     # Distributed or parallel?
     if args.local_rank != -1 or args.num_gpus > 1:
         raise NotImplementedError("No distributed or parallel training available at the moment.")
@@ -449,11 +421,8 @@ def main():
     if args.n_gpu > 0:
         torch.cuda.manual_seed_all(args.seed)
     
-    # Get lang2id
-    if args.do_train:
-        lang2id = {x:i for i,x in enumerate(sorted(ALL_LANGS))}
-    else:
-        lang2id = checkpoint_data["lang2id"]
+    # Create list of languages we handle
+    lang_list = sorted(ALL_LANGS)
     
     # Load tokenizer
     logger.info("Loading tokenizer...")
@@ -461,31 +430,41 @@ def main():
     with open(tokenizer_path, "rb") as f:
         tokenizer = pickle.load(f)
 
+    # Load model config
+    logger.info("Loading encoder config...")
+    encoder_config = BertConfig.from_json_file(os.path.join(args.dir_pretrained_model, "config.json"))        
+
+    # Create model and load any pretrained weights (minimally, those of the encoder)
+    logger.info("Loading model...")
+    encoder = BertForMaskedLM(config)
+    model = BertForLangID(encoder, lang_list, add_adapters=args.add_adapters)
+    model.load_state_dict(checkpoint_data["model_state_dict"])
+    model.to(args.device)
+    if args.freeze_encoder:
+        model.freeze_encoder()
+        
+    # Log some info on the model
+    logger.info("Encoder config: %s" % repr(model.encoder.config))
+    logger.info("Model params:")
+    for n,p in model.named_parameters():
+        msg = "  %s" % n
+        if p.requires_grad:
+            msg += " ***FROZEN***"
+        logger.info(msg)
+    logger.info("Nb model params: %d" % count_params(model))
+    logger.info("Nb params in encoder: %d" % count_params(model.encoder))    
+    logger.info("Nb params in pooler: %d" % count_params(model.pooler))
+    if args.add_adapters:
+        logger.info("Nb params in adapters: %d" % count_params(model.adapter))
+    logger.info("Nb params in classifier: %d" % count_params(model.classifier))
+        
         
     # Get data
-    if args.do_train:
-        logger.info("Loading training data from %s training files in %s..." % (len(train_paths), args.dir_train))
-        train_dataset = BertDatasetForClassification(train_paths,
-                                                     tokenizer,
-                                                     args.max_seq_len,
-                                                     sampling_alpha=args.sampling_alpha,
-                                                     weight_relevant=args.weight_relevant,
-                                                     encoding="utf-8",
-                                                     seed=args.seed,
-                                                     verbose=DEBUG)
-        # Check lang2id: keys should contain all langs, and nothing else
-        assert all(k in lang2id for k in ALL_LANGS)
-        for k in lang2id:
-            if k not in ALL_LANGS:
-                msg = "lang2id contains invalid key '%s'" % k
-                raise RuntimeError(msg)
-        # Store lang2id in checkpoint data
-        checkpoint_data["lang2id"] = lang2id
     if args.do_eval or args.eval_during_training:
         logger.info("Loading validation data from %s..." % args.path_dev)                                
         dev_dataset = BertDatasetForTesting(args.path_dev,
                                             tokenizer,
-                                            lang2id,
+                                            model.lang2id,
                                             args.max_seq_len,
                                             require_labels=True,
                                             encoding="utf-8",
@@ -494,55 +473,12 @@ def main():
         logger.info("Loading test data from %s..." % args.path_test)                                
         test_dataset = BertDatasetForTesting(args.path_test,
                                              tokenizer,
-                                             lang2id,
+                                             model.lang2id,
                                              args.max_seq_len,
                                              require_labels=False,
                                              encoding="utf-8",
                                              verbose=DEBUG)
 
-    # Load model config
-    logger.info("Loading config...")
-    config_path = os.path.join(args.dir_pretrained_model, "config.json")
-    config = BertConfig.from_json_file(config_path)        
-
-    # Create model and load pre-trained weigths
-    logger.info("Loading model...")
-    model = BertForMaskedLM(config)
-    model.load_state_dict(checkpoint_data["model_state_dict"])
-    model.to(args.device)
-        
-    # Create pooler and classifier, load pretrained weights if present
-    if "pooler_state_dict" in checkpoint_data:
-        logger.info("Loading pooler...")
-        if args.do_train:
-            pooler = Pooler(model.config.hidden_size, cls_only=(not args.avgpool))
-            checkpoint_data["pooler_config"] = {"avgpool": args.avgpool}
-        else:
-            # If we are just evaluating the model, then we load the
-            # pooler config to see whether we do --avgpool.
-            pooler_config = checkpoint_data["pooler_config"]
-            pooler = Pooler(model.config.hidden_size, cls_only=pooler_config["avgpool"])
-        pooler.load_state_dict(checkpoint_data["pooler_state_dict"])
-    else:
-        logger.info("Making pooler...")
-        pooler = Pooler(model.config.hidden_size, cls_only=(not args.avgpool))
-        checkpoint_data["pooler_config"] = {"avgpool": args.avgpool}
-    pooler.to(args.device)
-    if "classifier_state_dict" in checkpoint_data:
-        logger.info("Loading classifier...")
-    else:
-        logger.info("Making classifier...")
-    classifier = Classifier(model.config.hidden_size, len(lang2id))
-    if "classifier_state_dict" in checkpoint_data:
-        classifier.load_state_dict(checkpoint_data["classifier_state_dict"])
-    classifier.to(args.device)
-
-    # Log some info on the model
-    logger.info("Model config: %s" % repr(model.config))
-    logger.info("Nb params: %d" % count_params(model))
-    logger.info("Nb params in pooler: %d" % count_params(pooler))
-    logger.info("Nb params in classifier: %d" % count_params(classifier))
-        
     # Training
     if args.do_train:
         # Prepare optimizer
@@ -551,11 +487,7 @@ def main():
         num_opt_steps_per_epoch = args.num_train_steps_per_epoch // args.grad_accum_steps
         args.num_epochs = math.ceil(checkpoint_data["max_opt_steps"] / num_opt_steps_per_epoch)
         logger.info("Preparing optimizer...")
-        np_list = []
-        if not args.freeze_encoder:
-            np_list += list(model.named_parameters())
-        np_list += list(pooler.named_parameters())
-        np_list += list(classifier.named_parameters())        
+        np_list = list(model.named_parameters())
         no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
         opt_params = [
             {'params': [p for n, p in np_list if not any(nd in n for nd in no_decay)], 'weight_decay': 0.01},
@@ -598,23 +530,20 @@ def main():
         if not args.eval_during_training:
             dev_dataset = None
         train(model,
-              pooler,
-              classifier,
               optimizer,
-              train_dataset,
+              tokenizer,
+              target_lang,
               args,
               checkpoint_data,
               dev_dataset=dev_dataset)
         # Reload model
         checkpoint_data = torch.load(os.path.join(args.dir_output, "checkpoint.tar"))
         model.load_state_dict(checkpoint_data["model_state_dict"])
-        pooler.load_state_dict(checkpoint_data["pooler_state_dict"])
-        classifier.load_state_dict(checkpoint_data["classifier_state_dict"])
         
     # Evaluate model on dev set
     if args.do_eval:
         logger.info("*** Running evaluation... ***")
-        scores = evaluate(model, pooler, classifier, dev_dataset, args)
+        scores = evaluate(model, dev_dataset, args)
         logger.info("***** Evaluation Results *****")
         for score_name in sorted(scores.keys()):
             logger.info("- %s: %.4f" % (score_name, scores[score_name]))
@@ -622,7 +551,7 @@ def main():
     # Get model's predictions on test set
     if args.do_pred:
         logger.info("*** Running prediction... ***")        
-        logits = predict(model, pooler, classifier, test_dataset, args)
+        logits = predict(model, test_dataset, args)
         pred_class_ids = np.argmax(logits.cpu().numpy(), axis=1)
         pred_labels = [test_dataset.label_list[i] for i in pred_class_ids]
         path_pred = os.path.join(args.dir_output, "pred.txt")
