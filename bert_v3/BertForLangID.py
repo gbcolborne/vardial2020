@@ -141,17 +141,17 @@ class BertForLangID(nn.Module):
         - cls: integer ID of output unit we are training (to get all scores, leave this set to None)
 
         """
-        outputs = encoder.bert(input_ids=input_ids,
-                               attention_mask=input_mask,
-                               token_type_ids=segment_ids,
-                               position_ids=None)
+        outputs = self.encoder.bert(input_ids=input_ids,
+                                    attention_mask=input_mask,
+                                    token_type_ids=segment_ids,
+                                    position_ids=None)
         last_hidden_states = outputs[0]
-        encodings = pooler(last_hidden_states)
+        encodings = self.pooler(last_hidden_states)
         # Encodings have shape (batch size, hidden dim)
-        if self.adapter:
+        if self.adapter is not None:
             # If we use adapters, encodings will have shape (nb classes, batch size, hidden dim)
             encodings = self.adapter(encodings, cls=cls)
-        scores = classifier(encodings, cls=cls)
+        scores = self.classifier(encodings, cls=cls)
         return scores
 
 
