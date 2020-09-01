@@ -468,7 +468,7 @@ def main():
     logger.info("Model params:")
     for n,p in model.named_parameters():
         msg = "  %s" % n
-        if p.requires_grad:
+        if not p.requires_grad:
             msg += " ***FROZEN***"
         logger.info(msg)
     logger.info("Nb model params: %d" % count_params(model))
