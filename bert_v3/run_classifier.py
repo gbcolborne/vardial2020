@@ -500,7 +500,7 @@ def main():
     # Write config and tokenizer in output directory
     if (not args.resume) and args.do_train:
         path_config = os.path.join(args.dir_output, "config.json")
-        model.config.to_json_file(path_config)
+        model.encoder.config.to_json_file(path_config)
         path_tokenizer = os.path.join(args.dir_output, "tokenizer.pkl")
         with open(path_tokenizer, "wb") as f:
             pickle.dump(tokenizer, f)
