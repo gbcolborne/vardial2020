@@ -447,19 +447,22 @@ def main():
     with open(tokenizer_path, "rb") as f:
         tokenizer = pickle.load(f)
 
-    # Load model config
-    logger.info("Loading encoder config...")
-    encoder_config = BertConfig.from_json_file(os.path.join(args.dir_pretrained_model, "config.json"))        
+    # Load encoder
+    logger.info("Loading encoder...")
+    encoder_config = BertConfig.from_json_file(os.path.join(args.dir_pretrained_model, "config.json"))            
+    encoder = BertForMaskedLM(encoder_config)
+    if args.do_train and (not args.resume):
+        encoder.load_state_dict(checkpoint_data["model_state_dict"])
 
-    # Create model and load any pretrained weights (minimally, those of the encoder)
-    logger.info("Loading model...")
-    encoder = BertForMaskedLM(config)
+    # Create model and load weights if resuming
+    logger.info("Making model...")
     model = BertForLangID(encoder, lang_list, add_adapters=args.add_adapters)
-    model.load_state_dict(checkpoint_data["model_state_dict"])
     model.to(args.device)
+    if args.resume:
+        model.load_state_dict(checkpoint_data["model_state_dict"])    
     if args.freeze_encoder:
         model.freeze_encoder()
-        
+
     # Log some info on the model
     logger.info("Encoder config: %s" % repr(model.encoder.config))
     logger.info("Model params:")
