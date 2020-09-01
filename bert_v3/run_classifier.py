@@ -152,7 +152,8 @@ def train(model, optimizer, tokenizer, target_lang, args, checkpoint_data, dev_d
     # Evaluate model on dev set before training
     if (not args.resume) and args.eval_during_training:
         logger.info("Evaluating model on dev set before we start training...")
-        dev_scores = evaluate(model, dev_dataset, args)            
+        dev_scores = evaluate(model, dev_dataset, args)
+        best_score = dev_scores[args.score_to_optimize]        
         log_data = []
         log_data.append(str(checkpoint_data["global_step"]))
         log_data += ["", "", "", ""]
@@ -165,8 +166,6 @@ def train(model, optimizer, tokenizer, target_lang, args, checkpoint_data, dev_d
         
     # Start training
     logger.info("***** Running training *****")
-    if args.eval_during_training:
-        best_score = -1
     for epoch in trange(int(args.num_epochs), desc="Epoch"):
         model.train()
                   
