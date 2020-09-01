@@ -1,9 +1,7 @@
 """ Train or evaluate classifier. """
 
-import sys, os, argparse, glob, pickle, random, logging, math
+import sys, os, argparse, pickle, random, logging, math
 from io import open
-from itertools import chain
-from datetime import datetime
 import numpy as np
 import torch
 from torch.nn import CrossEntropyLoss
@@ -294,7 +292,7 @@ def main():
     # Execution modes
     parser.add_argument("--resume",
                         action="store_true",
-                        help="Resume training model in --dir_pretrained_model (note: --dir_output will be ignored unless you also --do_pred and the resumed training job terminates)")
+                        help="Resume training model in --dir_pretrained_model (note: --dir_output will be ignored)")
     parser.add_argument("--do_train",
                         action="store_true",
                         help="Run training")
