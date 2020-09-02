@@ -4,7 +4,7 @@ import sys, os, argparse, pickle, random, logging, math
 from io import open
 import numpy as np
 import torch
-from torch.nn import CrossEntropyLoss
+from torch.nn import BCEWithLogitsLoss
 from transformers import BertForMaskedLM, BertConfig
 from transformers import AdamW
 from tqdm import tqdm, trange
@@ -24,8 +24,8 @@ logging.basicConfig(format='%(asctime)s - %(levelname)s - %(name)s -   %(message
 logger = logging.getLogger(__name__)
 
 
-def evaluate(model, eval_dataset, args):
-    """ Evaluate model. 
+def evaluate(model, eval_dataset, target_lang_id, args):
+    """ Evaluate model on multi-class language identification. 
 
     Args:
     - model: BertModelForLangID
@@ -38,21 +38,28 @@ def evaluate(model, eval_dataset, args):
     # Get logits (un-normalized class scores) from model
     logits = predict(model, eval_dataset, args)
 
-    # Extract label IDs from the dataset
-    gold_label_ids = [x[3] for x in eval_dataset]
-    gold_label_ids = torch.tensor(gold_label_ids).to(args.device)
-    
+    # Extract labels
+    gold_labels = [x[3] for x in eval_dataset]
+
     # Compute loss
-    loss_fct = CrossEntropyLoss(reduction="mean")
-    loss = loss_fct(logits, gold_label_ids)
+    logger.info("Logits:")
+    logger.info(logits)
+    target_logits = logits[target_lang_id]
+    logger.info("Target logits:")
+    logger.info(target_logits)
+    logger.info("Labels:")
+    logger.info(gold_labels)
+    
+    loss_fct = BCEWithLogitsLoss(reduction="mean")
+    loss = loss_fct(target_logits, gold_labels)
     scores = {}
     scores["loss"] = loss.item()
     
     # Compute f-scores
-    pred_label_ids = np.argmax(logits.detach().cpu().numpy(), axis=1).tolist()    
-    gold_label_ids = gold_label_ids.detach().cpu().numpy().tolist()
-    pred_labels = [eval_dataset.label_list[i] for i in pred_label_ids]
-    gold_labels = [eval_dataset.label_list[i] for i in gold_label_ids]
+    pred_labels = np.argmax(logits.detach().cpu().numpy(), axis=1).tolist()    
+    gold_labels = gold_labels.detach().cpu().numpy().tolist()
+    pred_labels = [eval_dataset.label_list[i] for i in pred_labels]
+    gold_labels = [eval_dataset.label_list[i] for i in gold_labels]
     fscore_dict = compute_fscores(pred_labels, gold_labels, verbose=False)
     scores.update(fscore_dict)
     return scores
@@ -81,8 +88,8 @@ def predict(model, eval_dataset, args):
         input_mask = batch[1]
         segment_ids = batch[2]
         with torch.no_grad():
-            lid_scores = model(input_ids, input_mask, segment_ids, cls=None)
-        scores.append(lid_scores)
+            logits = model(input_ids, input_mask, segment_ids, cls=None)
+        scores.append(logits)
     scores_tensor = torch.cat(scores, dim=0)
     return scores_tensor
 
@@ -132,9 +139,34 @@ def train(model, optimizer, tokenizer, target_lang, args, checkpoint_data, dev_d
         with open(path_data, "wb") as f:
             pickle.save(train_dataset, f)
 
+
+    # Compute number of optimization steps we need to do            
+    if args.resume:
+        global_step = checkpoint_data["global_step"][target_lang]
+        nb_opt_steps = checkpoint_data["nb_opt_steps"][target_lang]
+        nb_opt_steps_per_epoch = len(train_dataset) // args.train_batch_size // args.grad_accum_steps
+        epochs_done = global_step // num_opt_steps_per_epoch
+        nb_batches_to_skip = (global_step % num_opt_steps_per_epoch) * args.grad_accum_steps
+        logger.info("Resuming training from optimization step %d/%d" % (global_step, nb_opt_steps))
+        logger.info("Nb epochs completed so far: %d" % epochs_done)
+    else:
+        epochs_done = 0
+        nb_opt_steps_per_epoch = len(train_dataset) // args.train_batch_size // args.grad_accum_steps
+        nb_opt_steps = nb_opt_steps_per_epoch * args.num_train_epochs
+        logger.info("Nb optimization steps to do: %d" % nb_opt_steps)
+        logger.info("Nb optimization steps per epoch: %d" % nb_opt_steps_per_epoch)
+        checkpoint_data["nb_opt_steps"][target_lang] = nb_opt_steps
+        checkpoint_data["global_step"][target_lang] = 0
+            
     # Make dataloader
     train_dataloader = get_dataloader(train_dataset, args.train_batch_size, args.local_rank)
 
+    # Skip batches if resuming
+    if args.resume:
+        logger.info("Skipping %d batches already observed this epoch" % nb_batches_to_skip)        
+        for _ in nb_batches_to_skip:
+            next(train_dataloader)
+            
     # Prepare log
     train_log_path = os.path.join(save_to_dir, "train-%s.log" % target_lang)
 
@@ -153,7 +185,7 @@ def train(model, optimizer, tokenizer, target_lang, args, checkpoint_data, dev_d
         dev_scores = evaluate(model, dev_dataset, args)
         best_score = dev_scores[args.score_to_optimize]        
         log_data = []
-        log_data.append(str(checkpoint_data["global_step"]))
+        log_data.append(str(checkpoint_data["global_step"][target_lang]))
         log_data += ["", "", "", ""]
         log_data.append("{:.5f}".format(dev_scores["loss"]))
         log_data.append("{:.5f}".format(dev_scores["track1"]))
@@ -164,7 +196,7 @@ def train(model, optimizer, tokenizer, target_lang, args, checkpoint_data, dev_d
         
     # Start training
     logger.info("***** Running training *****")
-    for epoch in trange(int(args.num_epochs), desc="Epoch"):
+    for epoch in trange(epochs_done, args.num_epochs, desc="Epoch"):
         model.train()
                   
         # Some stats for this epoch
@@ -174,22 +206,29 @@ def train(model, optimizer, tokenizer, target_lang, args, checkpoint_data, dev_d
         grad_norms = []
         
         # Run training for one epoch
-        for step in trange(int(args.num_train_steps_per_epoch), desc="Iteration"):
-            batch = next(train_batch_sampler)
+        for step, batch in enumerate(tqdm(train_dataloader, desc="Iteration")):
             batch = tuple(t.to(args.device) for t in batch)
             input_ids = batch[0]
             input_mask = batch[1]
             segment_ids = batch[2]
-            label_ids = batch[3]
+            labels = batch[3]
             lang_ids = batch[4]                
             real_batch_sizes.append(len(input_ids))
 
             # Call BERT encoder to get encoding of (un-masked) input sequences
-            lid_scores = model(input_ids, input_mask, segment_ids, cls=target_lang_id)
+            logits = model(input_ids, input_mask, segment_ids, cls=target_lang_id)
 
             # Compute loss, do backprop. Compute accuracies.
-            loss_fct = CrossEntropyLoss(reduction="mean")
-            loss = loss_fct(lid_scores, label_ids)
+
+
+            logger.info("Logits:")
+            logger.info(logits)
+            target_logits = logits[labels]
+            logger.info("Target logits:")
+            logger.info(target_logits)
+    
+            loss_fct = BCEWithLogitsLoss(reduction="mean")
+            loss = loss_fct(target_logits, labels)
             lid_losses.append(loss.item())
 
             # Backprop
@@ -204,15 +243,15 @@ def train(model, optimizer, tokenizer, target_lang, args, checkpoint_data, dev_d
             grad_norms.append(training_grad_norm)
 
             # Compute accuracies
-            lid_acc = accuracy(lid_scores, label_ids)
+            lid_acc = sys.exit()
             lid_accs.append(lid_acc)
 
             # Check if we accumulate grad or do an optimization step
             if (step + 1) % args.grad_accum_steps == 0:
                 optimizer.step()
                 optimizer.zero_grad()
-                checkpoint_data["global_step"] += 1
-                if checkpoint_data["global_step"] >= checkpoint_data["max_opt_steps"]:
+                checkpoint_data["global_step"][target_lang] += 1
+                if checkpoint_data["global_step"][target_lang] >= checkpoint_data["nb_opt_steps"][target_lang]:
                     break
                 
         # Compute stats for this epoch
@@ -231,7 +270,7 @@ def train(model, optimizer, tokenizer, target_lang, args, checkpoint_data, dev_d
             
         # Write stats for this epoch in log
         log_data = []
-        log_data.append(str(checkpoint_data["global_step"]))
+        log_data.append(str(checkpoint_data["global_step"][target_lang]))
         log_data.append("{:.5f}".format(avg_lid_loss))
         log_data.append("{:.5f}".format(avg_lid_acc))
         log_data.append("{:.5f}".format(last_grad_norm))
@@ -510,17 +549,21 @@ def main():
             
     # Train
     if args.do_train or args.resume:
+        # Add some data to checkpoint
+        if not args.resume:
+            checkpoint_data["global_step"] = {}
+            checkpoint_data["nb_opt_steps"] = {}
+        
         # Check which languages are left to process
         langs_left = lang_list[:]
         if args.resume:
-            start = langs_left.index(checkpoint_data["cur_lang"])
+            start = langs_left.index(checkpoint_data["current_lang"])
             langs_left = langs_left[start:]
             logger.info("Resuming training of classifier for '%s' (%d/%d)" % (target_lang,
                                                                               start+1,
                                                                               len(lang_list)))
         else:
             logger.info("Starting training of %d classifiers" % len(langs_left))            
-            checkpoint_data["global_step"] = 0
 
         # Log some info before training
         logger.info("*** Training info: ***")
@@ -533,7 +576,8 @@ def main():
         # Loop over the languages we haven't processed yet.
         for target_lang in langs_left:
             logger.info("Preparing to train classifier for '%s'" % target_lang)
-
+            checkpoint_data["current_lang"] = target_lang
+            
             # Prepare optimizer
             logger.info("  Preparing optimizer")
             np_list = list(model.named_parameters())
@@ -553,7 +597,7 @@ def main():
                 
             # Load optimizer state if resuming
             if args.resume:
-                optmizer.load_state_dict(checkpoint_data["optimizer_state_dict"])
+                optimizer.load_state_dict(checkpoint_data["optimizer_state_dict"])
         
             # Run training on current target language
             train(model,
