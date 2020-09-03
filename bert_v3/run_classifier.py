@@ -180,10 +180,13 @@ def train(model, optimizer, tokenizer, target_lang, args, checkpoint_data, dev_d
             f.write(header + "\n")
             
     # Evaluate model on dev set before training
-    if (not args.resume) and args.eval_during_training:
+    if args.resume:
+        best_score = checkpoint_data["best_score"]
+    elif args.eval_during_training:
         logger.info("Evaluating model on dev set before we start training...")
         dev_scores = evaluate(model, dev_dataset, args)
-        best_score = dev_scores[args.score_to_optimize]        
+        best_score = dev_scores[args.score_to_optimize]
+        checkpoint_data["best_score"] = best_score
         log_data = []
         log_data.append(str(checkpoint_data["global_step"][target_lang]))
         log_data += ["", "", "", ""]
@@ -283,20 +286,21 @@ def train(model, optimizer, tokenizer, target_lang, args, checkpoint_data, dev_d
         with open(train_log_path, "a") as f:
             f.write("\t".join(log_data)+"\n")
 
-        # Save checkpoint
-        save = True
+        # Save best model if score has improved
         if args.eval_during_training:
             current_score = dev_scores[args.score_to_optimize]
             if current_score > best_score:
                 best_score = current_score
-            else:
-                save = False
-        if save:
-            model_to_save = get_module(model)
-            checkpoint_data['model_state_dict'] = model_to_save.state_dict()
-            checkpoint_data['optimizer_state_dict'] = optimizer.state_dict()
-            checkpoint_path = os.path.join(save_to_dir, "checkpoint.tar")
-            torch.save(checkpoint_data, checkpoint_path)            
+                checkpoint_data["best_score"] = best_score
+                model_to_save = get_module(model)
+                checkpoint_data['best_model_state_dict'] = model_to_save.state_dict()
+
+        # Save checkpoint
+        model_to_save = get_module(model)
+        checkpoint_data['model_state_dict'] = model_to_save.state_dict()
+        checkpoint_data['optimizer_state_dict'] = optimizer.state_dict()
+        checkpoint_path = os.path.join(save_to_dir, "checkpoint.tar")
+        torch.save(checkpoint_data, checkpoint_path)            
     logger.info("Done training classifier for %s" % target_lang)
 
     # Clean up
@@ -498,7 +502,12 @@ def main():
     model = BertForLangID(encoder, lang_list, add_adapters=args.add_adapters)
     model.to(args.device)
     if args.resume:
-        model.load_state_dict(checkpoint_data["model_state_dict"])    
+        model.load_state_dict(checkpoint_data["model_state_dict"])
+    elif args.do_eval or args.do_pred:
+        if "best_model_state_dict" in checkpoint_data:
+            model.load_state_dict(checkpoint_data["best_model_state_dict"])
+        else:
+            model.load_state_dict(checkpoint_data["model_state_dict"])                    
     if args.freeze_encoder:
         model.freeze_encoder()
 
@@ -612,7 +621,10 @@ def main():
         # Reload model after training all classifiers
         save_to_dir = args.dir_pretrained_model if args.resume else args.dir_output
         checkpoint_data = torch.load(os.path.join(save_to_dir, "checkpoint.tar"))
-        model.load_state_dict(checkpoint_data["model_state_dict"])
+        if "best_model_state_dict" in checkpoint_data:
+            model.load_state_dict(checkpoint_data["best_model_state_dict"])
+        else:
+            model.load_state_dict(checkpoint_data["model_state_dict"])
         
     # Evaluate model on dev set
     if args.do_eval:
