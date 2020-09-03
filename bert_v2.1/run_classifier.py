@@ -144,9 +144,14 @@ def train(model, optimizer, train_dataset, args, checkpoint_data, dev_dataset=No
         unk_dataloader = get_dataloader(unk_dataset, args.train_batch_size, args.local_rank)
         unk_batch_enum = enumerate(iter(unk_dataloader))
 
+    # Initialize best score
     if not args.resume:
         checkpoint_data["best_score"] = 0
-        
+    if args.resume:
+        # This should not happen. I added it in between versions...
+        if "best_score" not in checkpoint_data:
+            checkpoint_data["best_score"] = 0
+
     # Evaluate model on dev set
     if args.eval_during_training:
         logger.info("Evaluating model on dev set before we %s training" % ("resume" if args.resume else "start"))
