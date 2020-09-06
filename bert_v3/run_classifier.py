@@ -2,6 +2,7 @@
 
 import sys, os, argparse, pickle, random, logging, math
 from io import open
+from copy import deepcopy
 import numpy as np
 import torch
 from torch.nn import BCEWithLogitsLoss
@@ -293,7 +294,7 @@ def train(model, optimizer, tokenizer, target_lang, args, checkpoint_data, dev_d
                 best_score = current_score
                 checkpoint_data["best_score"] = best_score
                 model_to_save = get_module(model)
-                checkpoint_data['best_model_state_dict'] = model_to_save.state_dict()
+                checkpoint_data['best_model_state_dict'] = deepcopy(model_to_save.state_dict())
 
         # Save checkpoint
         model_to_save = get_module(model)
