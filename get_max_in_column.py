@@ -19,4 +19,5 @@ data = data[1:]
 data = [float(x) for x in data]
 print("Col name: %s" % col_name)
 print("First value: %f" % data[0])
+print("Last value: %f" % data[-1])
 print("Max value: %f" % max(data))
