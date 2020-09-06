@@ -547,7 +547,7 @@ def main():
     
     # Load model weights. First, check if we just have an encoder, or a previously fine-tuned model
     if "classifier.dense.weight" in checkpoint_data["model_state_dict"]:
-        if "best_model_state_dict" in checkpoint_data:
+        if "best_model_state_dict" in checkpoint_data and not args.resume:
             logger.info("Loading model weights from 'best_model_state_dict'") 
             model.load_state_dict(checkpoint_data["best_model_state_dict"])
         else:
