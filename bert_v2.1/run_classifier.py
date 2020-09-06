@@ -537,27 +537,28 @@ def main():
     with open(tokenizer_path, "rb") as f:
         tokenizer = pickle.load(f)
 
-    # Load encoder
-    logger.info("Loading encoder...")
+    # Make encoder and model
+    logger.info("Making encoder...")
     encoder_config = BertConfig.from_json_file(os.path.join(args.dir_pretrained_model, "config.json"))            
     encoder = BertForMaskedLM(encoder_config)
-    if args.do_train and (not args.resume):
-        encoder.load_state_dict(checkpoint_data["model_state_dict"])
-
-    # Create model and load weights if resuming
     logger.info("Making model...")
     model = BertForLangID(encoder, lang_list)
     model.to(args.device)
-    if args.resume:
-        model.load_state_dict(checkpoint_data["model_state_dict"])
-    elif args.do_eval or args.do_pred:
+    
+    # Load model weights. First, check if we just have an encoder, or a previously fine-tuned model
+    if "classifier.dense.weight" in checkpoint_data["model_state_dict"]:
         if "best_model_state_dict" in checkpoint_data:
-            logger.info("Loading weights from 'best_model_state_dict'") 
+            logger.info("Loading model weights from 'best_model_state_dict'") 
             model.load_state_dict(checkpoint_data["best_model_state_dict"])
         else:
-            logger.info("Loading weights from 'model_state_dict'")             
+            logger.info("Loading model weights from 'model_state_dict'")             
             model.load_state_dict(checkpoint_data["model_state_dict"])            
-    if args.freeze_encoder:
+    else:
+        # Model has not previously been fine-tuned, so we only load encoder weights
+        assert args.do_train
+        logger.info("Loading encoder weights from 'model_state_dict'")                         
+        model.encoder.load_state_dict(checkpoint_data["model_state_dict"])
+    if (args.do_train or args.resume) and args.freeze_encoder:
         model.freeze_encoder()
 
     # Write encoder config and tokenizer in output directory
