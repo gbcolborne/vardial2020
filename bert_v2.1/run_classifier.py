@@ -161,7 +161,7 @@ def train(model, optimizer, train_dataset, args, checkpoint_data, dev_dataset=No
             if best_score > checkpoint_data["best_score"]:
                 checkpoint_data["best_score"] = best_score
                 model_to_save = get_module(model)
-                checkpoint_data['best_model_state_dict'] = model_to_save.state_dict()
+                checkpoint_data['best_model_state_dict'] = deepcopy(model_to_save.state_dict())
         else:
             checkpoint_data["best_score"] = best_score
         log_data = []
@@ -326,7 +326,7 @@ def train(model, optimizer, train_dataset, args, checkpoint_data, dev_dataset=No
                 best_score = current_score
                 checkpoint_data["best_score"] = best_score
                 model_to_save = get_module(model)
-                checkpoint_data['best_model_state_dict'] = model_to_save.state_dict()
+                checkpoint_data['best_model_state_dict'] = deepcopy(model_to_save.state_dict())
                 
         # Save datasets in case we need to resume later
         train_dataset.close_files()
@@ -552,8 +552,10 @@ def main():
         model.load_state_dict(checkpoint_data["model_state_dict"])
     elif args.do_eval or args.do_pred:
         if "best_model_state_dict" in checkpoint_data:
+            logger.info("Loading weights from 'best_model_state_dict'") 
             model.load_state_dict(checkpoint_data["best_model_state_dict"])
         else:
+            logger.info("Loading weights from 'model_state_dict'")             
             model.load_state_dict(checkpoint_data["model_state_dict"])            
     if args.freeze_encoder:
         model.freeze_encoder()
