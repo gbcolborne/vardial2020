@@ -1,6 +1,7 @@
 # Sub-directories to ignore
 data/
 jobs/
+jobs*/
 
 # Emacs backup files
 *~
