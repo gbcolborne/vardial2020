@@ -99,14 +99,6 @@ def main():
     outdir_test = os.path.join(args.output_dir, "Test")        
     os.makedirs(outdir_train)
     os.makedirs(outdir_test)
-
-    # We expect that the input dir contains n files called lang.train,
-    # which contain unlabeled text (without labels, URLS or text IDs)
-    for n in os.listdir(args.input_dir):
-        cut = n.index(".")
-        lang = n[:cut]
-        assert lang in ALL_LANGS
-        assert n[cut+1:] == "train"
         
     # Set up logging
     logger = logging.getLogger(__name__)
@@ -114,6 +106,14 @@ def main():
                         datefmt = '%m/%d/%Y %H:%M:%S',
                         level = logging.DEBUG)
 
+    # We expect that the input dir contains n files called lang.train,
+    # which contain unlabeled text (without labels, URLS or text IDs)
+    filenames = [n for n in os.listdir(args.input_dir) if n[-6:] == ".train"]
+    logger.info("Nb training files found: %d" % len(filenames))
+    for n in filenames:
+        lang = n[:-6]
+        assert lang in ALL_LANGS
+    
     # Seed RNG
     np.random.seed(91500)
     
